@@ -118,6 +118,39 @@ func TestSelfAttentionNilCacheMatchesPlaceholderCache(t *testing.T) {
 	assertTensorClose(t, withoutCache, withCache, 1e-9)
 }
 
+func TestSelfAttentionCachedMatchesUncachedFinalToken(t *testing.T) {
+	attention := identityAttention(2, 1)
+	input := mustTensorFromSlice(tensor.FromSlice([]float64{
+		1, 0,
+		0, 1,
+		2, 2,
+	}, 3, 2))
+
+	fullOutput, err := attention.Forward(input, nil)
+	if err != nil {
+		t.Fatalf("Forward(full) error: %v", err)
+	}
+	cache := &KVCache{}
+	var incrementalOutput *tensor.Tensor
+	for _, token := range [][][]float64{
+		{{1, 0}},
+		{{0, 1}},
+		{{2, 2}},
+	} {
+		stepInput := mustTensorFromSlice(tensor.FromSlice(flatten2D(token), 1, 2))
+		incrementalOutput, err = attention.Forward(stepInput, &AttentionOptions{Cache: cache})
+		if err != nil {
+			t.Fatalf("Forward(step) error: %v", err)
+		}
+	}
+
+	lastRow, err := selectRow(fullOutput, 2)
+	if err != nil {
+		t.Fatalf("selectRow error: %v", err)
+	}
+	assertTensorClose(t, incrementalOutput, mustTensorFromSlice(tensor.FromSlice(lastRow.Data(), 1, len(lastRow.Data()))), 1e-9)
+}
+
 func identityAttention(modelDim, numHeads int) *SelfAttention {
 	identity := identityMatrix(modelDim)
 	return &SelfAttention{
@@ -191,4 +224,12 @@ func mustTensorFromSlice(tn *tensor.Tensor, err error) *tensor.Tensor {
 		panic(err)
 	}
 	return tn
+}
+
+func flatten2D(values [][]float64) []float64 {
+	flat := make([]float64, 0, len(values)*len(values[0]))
+	for _, row := range values {
+		flat = append(flat, row...)
+	}
+	return flat
 }

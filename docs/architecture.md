@@ -14,7 +14,11 @@ token ids
     v
 runtime.Engine
     |
-    +--> model.Forward(tokens, cache)
+    +--> cache-capable model? ---- yes ----> model.NewCache + incremental Forward
+    |                  |
+    |                  no
+    |                  |
+    +-----------------> model.Forward(tokens, cache)
     |         |
     |         v
     |   transformer.TinyTransformer
@@ -45,7 +49,7 @@ Current implementation boundaries:
 
 - `internal/model` owns model configuration and forward-pass contracts.
 - `internal/transformer` implements a tiny model with deterministic embeddings, explicit decoder blocks, and an output projection.
-- `internal/runtime` owns the autoregressive loop.
+- `internal/runtime` owns the autoregressive loop and chooses between uncached full-sequence decoding and optional cache-backed incremental decoding.
 - `internal/tokenizer` currently uses a byte-level tokenizer for simplicity and full input coverage.
 - `internal/tensor` exposes the minimal operations needed for the tiny model and future incremental expansion.
 - `internal/server` provides API skeletons without committing to a transport design too early.
@@ -58,16 +62,19 @@ The transformer package is now split into explicit subcomponents:
 - `LayerNorm` handles per-token normalization.
 - `FeedForward` handles the MLP path.
 - `DecoderBlock` composes those pieces into the standard pre-norm decoder flow.
-- `TransformerCache`, `KVCache`, and `AttentionOptions` are placeholder types that let attention and blocks accept cache-shaped inputs today without implementing KV reuse yet.
+- `TransformerCache`, `KVCache`, and `AttentionOptions` now carry real per-layer cached keys and values for incremental decoding.
 
-This refactor makes KV caching easier because cache plumbing now has a clear home in the attention path and block options. Adding real cached keys and values later should extend `KVCache` and the attention forward path rather than forcing another structural rewrite of `TinyTransformer`.
+## Cached Generation
+
+`runtime.Engine` now supports an optional cache-aware generation path. Models can opt in by implementing the cache-capable extension in `internal/model`, which lets the runtime allocate a fresh cache for each generation request and then feed only newly generated tokens back through the model after the initial prompt prefill.
+
+If a model does not implement the cache-capable extension, runtime generation falls back to the original full-sequence decoding path automatically.
 
 ## Future Milestones
 
 - Real BPE tokenizer
 - GPT-2 weight loading
-- Attention implementation
-- KV cache
+- Cache-aware benchmarking and profiling
 - Streaming API
 - Benchmarking
 - Batching

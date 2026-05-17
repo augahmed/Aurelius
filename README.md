@@ -22,7 +22,7 @@ The current prototype is intentionally small:
 - `internal/model` defines shared model contracts and configuration.
 - `internal/transformer` contains a deterministic toy transformer-style model that exercises the runtime path.
 - `internal/sampler` provides greedy and temperature-based next-token selection.
-- `internal/runtime` coordinates tokenization, model forward passes, and autoregressive generation.
+- `internal/runtime` coordinates tokenization, model forward passes, and autoregressive generation, including optional KV-cached decoding when a model supports it.
 - `internal/server` provides a minimal HTTP skeleton for future API work.
 - `cmd/aurelius` exposes the prototype via a CLI.
 
@@ -49,9 +49,9 @@ aurelius/
 - [x] Implement correctness-first tensor operations
 - [x] Build a deterministic toy transformer inference path
 - [x] Add an autoregressive runtime loop
+- [x] Add optional KV-cached autoregressive generation in the runtime
 - [x] Expose a simple CLI
 - [x] Add initial tests and architecture documentation
-- [ ] Add real attention and KV cache plumbing
 - [ ] Add pretrained weight loading
 - [ ] Add streaming and benchmarking workflows
 
@@ -59,6 +59,8 @@ aurelius/
 
 ```bash
 go run ./cmd/aurelius -prompt "hello world" -max-tokens 10
+go run ./cmd/aurelius -prompt "hello world" -max-tokens 10 -use-cache=true
+go run ./cmd/aurelius generate -prompt "hello world" -max-tokens 10 -use-cache=true
 ```
 
 ## Development Commands
@@ -67,8 +69,11 @@ go run ./cmd/aurelius -prompt "hello world" -max-tokens 10
 gofmt -w ./cmd ./internal
 go test ./...
 go run ./cmd/aurelius -prompt "hello world" -max-tokens 10
+go run ./cmd/aurelius -prompt "hello world" -max-tokens 10 -use-cache=true
 ```
 
 ## Notes
 
 This repository does not attempt real model loading yet. The current focus is architectural clarity, stable tests, and a small inference path that future work can replace piece by piece.
+
+Cache-aware generation is optional per model. `runtime.Engine` detects models that implement the cache-capable extension and uses incremental decoding only for those models; all other models continue to use the uncached full-sequence path.

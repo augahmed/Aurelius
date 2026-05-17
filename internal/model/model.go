@@ -48,3 +48,10 @@ type Model interface {
 	Config() Config
 	Forward(input []int, cache Cache) ([]float64, error)
 }
+
+// CacheCapableModel is an optional extension for models that can allocate
+// reusable cache state for incremental decoding.
+type CacheCapableModel interface {
+	Model
+	NewCache() Cache
+}

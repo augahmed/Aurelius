@@ -59,8 +59,6 @@ func NewSelfAttention(modelDim, numHeads, seed int) (*SelfAttention, error) {
 }
 
 func (s *SelfAttention) Forward(input *tensor.Tensor, options *AttentionOptions) (*tensor.Tensor, error) {
-	_ = options
-
 	shape := input.Shape()
 	if len(shape) != 2 {
 		return nil, fmt.Errorf("attention input must be rank-2, got %v", shape)
@@ -83,6 +81,24 @@ func (s *SelfAttention) Forward(input *tensor.Tensor, options *AttentionOptions)
 		return nil, err
 	}
 
+	contextKeys := keys
+	contextValues := values
+	pastLength := 0
+	if options != nil && options.Cache != nil {
+		cachedKeys, cachedValues := options.Cache.State()
+		pastLength = options.Cache.SequenceLength()
+		if pastLength > 0 {
+			contextKeys, err = concatRows(cachedKeys, keys)
+			if err != nil {
+				return nil, err
+			}
+			contextValues, err = concatRows(cachedValues, values)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	combined, err := tensor.New(seqLen, modelDim)
 	if err != nil {
 		return nil, err
@@ -91,18 +107,18 @@ func (s *SelfAttention) Forward(input *tensor.Tensor, options *AttentionOptions)
 	for head := 0; head < s.numHeads; head++ {
 		headOffset := head * s.headDim
 		for queryIndex := 0; queryIndex < seqLen; queryIndex++ {
-			weights, err := s.causalWeights(queries, keys, queryIndex, headOffset)
+			weights, err := s.causalWeights(queries, contextKeys, pastLength, queryIndex, headOffset)
 			if err != nil {
 				return nil, err
 			}
 			for valueDim := 0; valueDim < s.headDim; valueDim++ {
 				sum := 0.0
-				for keyIndex := 0; keyIndex < seqLen; keyIndex++ {
+				for keyIndex := 0; keyIndex < pastLength+queryIndex+1; keyIndex++ {
 					weight, err := weights.At(keyIndex)
 					if err != nil {
 						return nil, err
 					}
-					value, err := values.At(keyIndex, headOffset+valueDim)
+					value, err := contextValues.At(keyIndex, headOffset+valueDim)
 					if err != nil {
 						return nil, err
 					}
@@ -115,17 +131,24 @@ func (s *SelfAttention) Forward(input *tensor.Tensor, options *AttentionOptions)
 		}
 	}
 
+	if options != nil && options.Cache != nil {
+		if err := options.Cache.Append(keys, values); err != nil {
+			return nil, err
+		}
+	}
+
 	return tensor.MatMul(combined, s.outWeights)
 }
 
-func (s *SelfAttention) causalWeights(queries, keys *tensor.Tensor, queryIndex, headOffset int) (*tensor.Tensor, error) {
-	shape := queries.Shape()
-	seqLen := shape[0]
-	scores := make([]float64, seqLen)
+func (s *SelfAttention) causalWeights(queries, keys *tensor.Tensor, pastLength, queryIndex, headOffset int) (*tensor.Tensor, error) {
+	shape := keys.Shape()
+	totalKeys := shape[0]
+	scores := make([]float64, totalKeys)
 	scale := math.Sqrt(float64(s.headDim))
+	visibleKeys := pastLength + queryIndex + 1
 
-	for keyIndex := 0; keyIndex < seqLen; keyIndex++ {
-		if keyIndex > queryIndex {
+	for keyIndex := 0; keyIndex < totalKeys; keyIndex++ {
+		if keyIndex >= visibleKeys {
 			scores[keyIndex] = math.Inf(-1)
 			continue
 		}
@@ -144,7 +167,7 @@ func (s *SelfAttention) causalWeights(queries, keys *tensor.Tensor, queryIndex, 
 		scores[keyIndex] = dot / scale
 	}
 
-	scoreTensor, err := tensor.FromSlice(scores, seqLen)
+	scoreTensor, err := tensor.FromSlice(scores, totalKeys)
 	if err != nil {
 		return nil, err
 	}

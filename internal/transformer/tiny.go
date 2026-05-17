@@ -73,20 +73,29 @@ func (m *TinyTransformer) Config() model.Config {
 	return m.cfg
 }
 
+func (m *TinyTransformer) NewCache() model.Cache {
+	return NewTransformerCache(m.cfg.NumLayers)
+}
+
 func (m *TinyTransformer) Forward(input []int, cache model.Cache) ([]float64, error) {
 	if len(input) == 0 {
 		return nil, fmt.Errorf("input token sequence cannot be empty")
 	}
-	if len(input) > m.cfg.ContextLength {
-		return nil, fmt.Errorf("input length %d exceeds context length %d", len(input), m.cfg.ContextLength)
+	transformerCache := cacheFromModelCache(cache)
+	positionOffset := 0
+	if transformerCache != nil {
+		positionOffset = transformerCache.SequenceLength()
+	}
+	totalLength := positionOffset + len(input)
+	if totalLength > m.cfg.ContextLength {
+		return nil, fmt.Errorf("input length %d with cache length %d exceeds context length %d", len(input), positionOffset, m.cfg.ContextLength)
 	}
 
-	state, err := m.embed(input)
+	state, err := m.embed(input, positionOffset)
 	if err != nil {
 		return nil, err
 	}
 
-	transformerCache := cacheFromModelCache(cache)
 	for i, block := range m.blocks {
 		state, err = block.Forward(state, blockOptions(transformerCache, i))
 		if err != nil {
@@ -105,7 +114,7 @@ func (m *TinyTransformer) Forward(input []int, cache model.Cache) ([]float64, er
 	return logits.Data(), nil
 }
 
-func (m *TinyTransformer) embed(tokens []int) (*tensor.Tensor, error) {
+func (m *TinyTransformer) embed(tokens []int, positionOffset int) (*tensor.Tensor, error) {
 	out, err := tensor.New(len(tokens), m.cfg.EmbeddingDim)
 	if err != nil {
 		return nil, err
@@ -119,7 +128,7 @@ func (m *TinyTransformer) embed(tokens []int) (*tensor.Tensor, error) {
 			if err != nil {
 				return nil, err
 			}
-			positionValue, err := m.positionEmbeddings.At(row, col)
+			positionValue, err := m.positionEmbeddings.At(positionOffset+row, col)
 			if err != nil {
 				return nil, err
 			}
