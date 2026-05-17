@@ -8,9 +8,9 @@ import (
 )
 
 func TestMultiHeadSelfAttentionForwardShape(t *testing.T) {
-	attention, err := newMultiHeadSelfAttention(4, 2, 1)
+	attention, err := NewSelfAttention(4, 2, 1)
 	if err != nil {
-		t.Fatalf("newMultiHeadSelfAttention error: %v", err)
+		t.Fatalf("NewSelfAttention error: %v", err)
 	}
 	input := mustTensorFromSlice(tensor.FromSlice([]float64{
 		1, 0, 0, 1,
@@ -18,7 +18,7 @@ func TestMultiHeadSelfAttentionForwardShape(t *testing.T) {
 		1, 1, 0, 0,
 	}, 3, 4))
 
-	output, err := attention.Forward(input)
+	output, err := attention.Forward(input, nil)
 	if err != nil {
 		t.Fatalf("Forward error: %v", err)
 	}
@@ -41,11 +41,11 @@ func TestMultiHeadSelfAttentionAppliesCausalMask(t *testing.T) {
 		-3, 5,
 	}, 3, 2))
 
-	baseOutput, err := attention.Forward(base)
+	baseOutput, err := attention.Forward(base, nil)
 	if err != nil {
 		t.Fatalf("Forward(base) error: %v", err)
 	}
-	modifiedOutput, err := attention.Forward(modifiedFuture)
+	modifiedOutput, err := attention.Forward(modifiedFuture, nil)
 	if err != nil {
 		t.Fatalf("Forward(modifiedFuture) error: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestMultiHeadSelfAttentionDeterministicOutput(t *testing.T) {
 		0, 1,
 	}, 2, 2))
 
-	output, err := attention.Forward(input)
+	output, err := attention.Forward(input, nil)
 	if err != nil {
 		t.Fatalf("Forward error: %v", err)
 	}
@@ -89,21 +89,73 @@ func TestMultiHeadSelfAttentionDeterministicOutput(t *testing.T) {
 	}, 1e-9)
 }
 
-func TestNewMultiHeadSelfAttentionRejectsInvalidHeadLayout(t *testing.T) {
-	if _, err := newMultiHeadSelfAttention(3, 2, 1); err == nil {
+func TestNewSelfAttentionRejectsInvalidHeadLayout(t *testing.T) {
+	if _, err := NewSelfAttention(3, 2, 1); err == nil {
 		t.Fatal("expected invalid head layout error")
 	}
 }
 
-func identityAttention(modelDim, numHeads int) *multiHeadSelfAttention {
+func TestSelfAttentionNilCacheMatchesPlaceholderCache(t *testing.T) {
+	attention := identityAttention(2, 1)
+	input := mustTensorFromSlice(tensor.FromSlice([]float64{
+		1, 0,
+		0, 1,
+	}, 2, 2))
+
+	withoutCache, err := attention.Forward(input, nil)
+	if err != nil {
+		t.Fatalf("Forward(nil) error: %v", err)
+	}
+	withCache, err := attention.Forward(input, &AttentionOptions{Cache: &KVCache{}})
+	if err != nil {
+		t.Fatalf("Forward(with cache) error: %v", err)
+	}
+
+	assertClose2D(t, withoutCache, [][]float64{
+		{1, 0},
+		{1 / (1 + math.Exp(1/math.Sqrt2)), math.Exp(1/math.Sqrt2) / (1 + math.Exp(1/math.Sqrt2))},
+	}, 1e-9)
+	assertTensorClose(t, withoutCache, withCache, 1e-9)
+}
+
+func identityAttention(modelDim, numHeads int) *SelfAttention {
 	identity := identityMatrix(modelDim)
-	return &multiHeadSelfAttention{
+	return &SelfAttention{
 		numHeads:     numHeads,
 		headDim:      modelDim / numHeads,
 		queryWeights: identity,
 		keyWeights:   identity,
 		valueWeights: identity,
 		outWeights:   identity,
+	}
+}
+
+func assertTensorClose(t *testing.T, got, want *tensor.Tensor, tolerance float64) {
+	t.Helper()
+	shape := got.Shape()
+	wantShape := want.Shape()
+	if len(shape) != len(wantShape) {
+		t.Fatalf("shape rank = %v, want %v", shape, wantShape)
+	}
+	for i := range shape {
+		if shape[i] != wantShape[i] {
+			t.Fatalf("shape = %v, want %v", shape, wantShape)
+		}
+	}
+	for row := 0; row < shape[0]; row++ {
+		for col := 0; col < shape[1]; col++ {
+			gotValue, err := got.At(row, col)
+			if err != nil {
+				t.Fatalf("got.At(%d, %d) error: %v", row, col, err)
+			}
+			wantValue, err := want.At(row, col)
+			if err != nil {
+				t.Fatalf("want.At(%d, %d) error: %v", row, col, err)
+			}
+			if math.Abs(gotValue-wantValue) > tolerance {
+				t.Fatalf("value at (%d, %d) = %.12f, want %.12f", row, col, gotValue, wantValue)
+			}
+		}
 	}
 }
 

@@ -44,11 +44,23 @@ The prototype is CPU-only and correctness-first. It uses a deterministic toy tra
 Current implementation boundaries:
 
 - `internal/model` owns model configuration and forward-pass contracts.
-- `internal/transformer` implements a tiny model with deterministic embeddings, residual blocks, and an output projection.
+- `internal/transformer` implements a tiny model with deterministic embeddings, explicit decoder blocks, and an output projection.
 - `internal/runtime` owns the autoregressive loop.
 - `internal/tokenizer` currently uses a byte-level tokenizer for simplicity and full input coverage.
 - `internal/tensor` exposes the minimal operations needed for the tiny model and future incremental expansion.
 - `internal/server` provides API skeletons without committing to a transport design too early.
+
+## Transformer Component Layout
+
+The transformer package is now split into explicit subcomponents:
+
+- `SelfAttention` handles causal multi-head attention over the full sequence.
+- `LayerNorm` handles per-token normalization.
+- `FeedForward` handles the MLP path.
+- `DecoderBlock` composes those pieces into the standard pre-norm decoder flow.
+- `TransformerCache`, `KVCache`, and `AttentionOptions` are placeholder types that let attention and blocks accept cache-shaped inputs today without implementing KV reuse yet.
+
+This refactor makes KV caching easier because cache plumbing now has a clear home in the attention path and block options. Adding real cached keys and values later should extend `KVCache` and the attention forward path rather than forcing another structural rewrite of `TinyTransformer`.
 
 ## Future Milestones
 

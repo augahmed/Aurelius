@@ -7,7 +7,11 @@ import (
 	"github.com/augahmed/aurelius/internal/tensor"
 )
 
-type multiHeadSelfAttention struct {
+type AttentionOptions struct {
+	Cache *KVCache
+}
+
+type SelfAttention struct {
 	numHeads     int
 	headDim      int
 	queryWeights *tensor.Tensor
@@ -16,7 +20,7 @@ type multiHeadSelfAttention struct {
 	outWeights   *tensor.Tensor
 }
 
-func newMultiHeadSelfAttention(modelDim, numHeads, seed int) (*multiHeadSelfAttention, error) {
+func NewSelfAttention(modelDim, numHeads, seed int) (*SelfAttention, error) {
 	if modelDim <= 0 {
 		return nil, fmt.Errorf("model dimension must be positive")
 	}
@@ -44,7 +48,7 @@ func newMultiHeadSelfAttention(modelDim, numHeads, seed int) (*multiHeadSelfAtte
 		return nil, err
 	}
 
-	return &multiHeadSelfAttention{
+	return &SelfAttention{
 		numHeads:     numHeads,
 		headDim:      modelDim / numHeads,
 		queryWeights: queryWeights,
@@ -54,25 +58,27 @@ func newMultiHeadSelfAttention(modelDim, numHeads, seed int) (*multiHeadSelfAtte
 	}, nil
 }
 
-func (m *multiHeadSelfAttention) Forward(input *tensor.Tensor) (*tensor.Tensor, error) {
+func (s *SelfAttention) Forward(input *tensor.Tensor, options *AttentionOptions) (*tensor.Tensor, error) {
+	_ = options
+
 	shape := input.Shape()
 	if len(shape) != 2 {
 		return nil, fmt.Errorf("attention input must be rank-2, got %v", shape)
 	}
 	seqLen, modelDim := shape[0], shape[1]
-	if modelDim != m.numHeads*m.headDim {
-		return nil, fmt.Errorf("attention input dimension %d does not match configured dimension %d", modelDim, m.numHeads*m.headDim)
+	if modelDim != s.numHeads*s.headDim {
+		return nil, fmt.Errorf("attention input dimension %d does not match configured dimension %d", modelDim, s.numHeads*s.headDim)
 	}
 
-	queries, err := tensor.MatMul(input, m.queryWeights)
+	queries, err := tensor.MatMul(input, s.queryWeights)
 	if err != nil {
 		return nil, err
 	}
-	keys, err := tensor.MatMul(input, m.keyWeights)
+	keys, err := tensor.MatMul(input, s.keyWeights)
 	if err != nil {
 		return nil, err
 	}
-	values, err := tensor.MatMul(input, m.valueWeights)
+	values, err := tensor.MatMul(input, s.valueWeights)
 	if err != nil {
 		return nil, err
 	}
@@ -82,14 +88,14 @@ func (m *multiHeadSelfAttention) Forward(input *tensor.Tensor) (*tensor.Tensor, 
 		return nil, err
 	}
 
-	for head := 0; head < m.numHeads; head++ {
-		headOffset := head * m.headDim
+	for head := 0; head < s.numHeads; head++ {
+		headOffset := head * s.headDim
 		for queryIndex := 0; queryIndex < seqLen; queryIndex++ {
-			weights, err := m.causalWeights(queries, keys, queryIndex, headOffset)
+			weights, err := s.causalWeights(queries, keys, queryIndex, headOffset)
 			if err != nil {
 				return nil, err
 			}
-			for valueDim := 0; valueDim < m.headDim; valueDim++ {
+			for valueDim := 0; valueDim < s.headDim; valueDim++ {
 				sum := 0.0
 				for keyIndex := 0; keyIndex < seqLen; keyIndex++ {
 					weight, err := weights.At(keyIndex)
@@ -109,14 +115,14 @@ func (m *multiHeadSelfAttention) Forward(input *tensor.Tensor) (*tensor.Tensor, 
 		}
 	}
 
-	return tensor.MatMul(combined, m.outWeights)
+	return tensor.MatMul(combined, s.outWeights)
 }
 
-func (m *multiHeadSelfAttention) causalWeights(queries, keys *tensor.Tensor, queryIndex, headOffset int) (*tensor.Tensor, error) {
+func (s *SelfAttention) causalWeights(queries, keys *tensor.Tensor, queryIndex, headOffset int) (*tensor.Tensor, error) {
 	shape := queries.Shape()
 	seqLen := shape[0]
 	scores := make([]float64, seqLen)
-	scale := math.Sqrt(float64(m.headDim))
+	scale := math.Sqrt(float64(s.headDim))
 
 	for keyIndex := 0; keyIndex < seqLen; keyIndex++ {
 		if keyIndex > queryIndex {
@@ -124,7 +130,7 @@ func (m *multiHeadSelfAttention) causalWeights(queries, keys *tensor.Tensor, que
 			continue
 		}
 		dot := 0.0
-		for dim := 0; dim < m.headDim; dim++ {
+		for dim := 0; dim < s.headDim; dim++ {
 			queryValue, err := queries.At(queryIndex, headOffset+dim)
 			if err != nil {
 				return nil, err
