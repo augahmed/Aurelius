@@ -27,6 +27,9 @@ func (c Config) Validate() error {
 	if c.NumHeads <= 0 {
 		return fmt.Errorf("num heads must be positive")
 	}
+	if c.EmbeddingDim%c.NumHeads != 0 {
+		return fmt.Errorf("embedding dim %d must be divisible by num heads %d", c.EmbeddingDim, c.NumHeads)
+	}
 	return nil
 }
 

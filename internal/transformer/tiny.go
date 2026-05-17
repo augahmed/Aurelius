@@ -8,14 +8,21 @@ import (
 )
 
 type TinyTransformer struct {
-	cfg        model.Config
-	embeddings *tensor.Tensor
-	blocks     []block
-	output     *tensor.Tensor
+	cfg                model.Config
+	embeddings         *tensor.Tensor
+	positionEmbeddings *tensor.Tensor
+	blocks             []block
+	output             *tensor.Tensor
 }
 
 type block struct {
-	linear *tensor.Tensor
+	attention *multiHeadSelfAttention
+	mlp       *feedForward
+}
+
+type feedForward struct {
+	upWeights   *tensor.Tensor
+	downWeights *tensor.Tensor
 }
 
 func NewTinyTransformer(cfg model.Config) (*TinyTransformer, error) {
@@ -26,23 +33,35 @@ func NewTinyTransformer(cfg model.Config) (*TinyTransformer, error) {
 	if err != nil {
 		return nil, err
 	}
+	positionEmbeddings, err := newPositionEmbeddingMatrix(cfg.ContextLength, cfg.EmbeddingDim)
+	if err != nil {
+		return nil, err
+	}
 	blocks := make([]block, cfg.NumLayers)
 	for i := 0; i < cfg.NumLayers; i++ {
-		linear, err := newWeightMatrix(cfg.EmbeddingDim, cfg.EmbeddingDim, i+1)
+		attention, err := newMultiHeadSelfAttention(cfg.EmbeddingDim, cfg.NumHeads, i+1)
 		if err != nil {
 			return nil, err
 		}
-		blocks[i] = block{linear: linear}
+		mlp, err := newFeedForward(cfg.EmbeddingDim, cfg.EmbeddingDim*2, cfg.NumLayers+i+1)
+		if err != nil {
+			return nil, err
+		}
+		blocks[i] = block{
+			attention: attention,
+			mlp:       mlp,
+		}
 	}
-	output, err := newWeightMatrix(cfg.EmbeddingDim, cfg.VocabSize, cfg.NumLayers+2)
+	output, err := newWeightMatrix(cfg.EmbeddingDim, cfg.VocabSize, cfg.NumLayers*2+4)
 	if err != nil {
 		return nil, err
 	}
 	return &TinyTransformer{
-		cfg:        cfg,
-		embeddings: embeddings,
-		blocks:     blocks,
-		output:     output,
+		cfg:                cfg,
+		embeddings:         embeddings,
+		positionEmbeddings: positionEmbeddings,
+		blocks:             blocks,
+		output:             output,
 	}, nil
 }
 
@@ -52,7 +71,7 @@ func DefaultTinyConfig(vocabSize int) model.Config {
 		ContextLength: 128,
 		EmbeddingDim:  16,
 		NumLayers:     2,
-		NumHeads:      1,
+		NumHeads:      4,
 	}
 }
 
@@ -61,17 +80,14 @@ func (m *TinyTransformer) Config() model.Config {
 }
 
 func (m *TinyTransformer) Forward(input []int, cache model.Cache) ([]float64, error) {
+	_ = cache
 	if len(input) == 0 {
 		return nil, fmt.Errorf("input token sequence cannot be empty")
 	}
 	if len(input) > m.cfg.ContextLength {
 		return nil, fmt.Errorf("input length %d exceeds context length %d", len(input), m.cfg.ContextLength)
 	}
-	sequence, err := m.embed(input)
-	if err != nil {
-		return nil, err
-	}
-	state, err := meanRows(sequence)
+	state, err := m.embed(input)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +97,11 @@ func (m *TinyTransformer) Forward(input []int, cache model.Cache) ([]float64, er
 			return nil, err
 		}
 	}
-	logits, err := project(state, m.output)
+	lastTokenState, err := selectRow(state, len(input)-1)
+	if err != nil {
+		return nil, err
+	}
+	logits, err := project(lastTokenState, m.output)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +118,102 @@ func (m *TinyTransformer) embed(tokens []int) (*tensor.Tensor, error) {
 			return nil, fmt.Errorf("token %d out of range", token)
 		}
 		for col := 0; col < m.cfg.EmbeddingDim; col++ {
-			value, err := m.embeddings.At(token, col)
+			tokenValue, err := m.embeddings.At(token, col)
+			if err != nil {
+				return nil, err
+			}
+			positionValue, err := m.positionEmbeddings.At(row, col)
+			if err != nil {
+				return nil, err
+			}
+			if err := out.Set(tokenValue+positionValue, row, col); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
+}
+
+func (b block) apply(input *tensor.Tensor) (*tensor.Tensor, error) {
+	normInput, err := layerNormRows(input, 1e-5)
+	if err != nil {
+		return nil, err
+	}
+	attended, err := b.attention.Forward(normInput)
+	if err != nil {
+		return nil, err
+	}
+	withAttentionResidual, err := tensor.Add(input, attended)
+	if err != nil {
+		return nil, err
+	}
+	normResidual, err := layerNormRows(withAttentionResidual, 1e-5)
+	if err != nil {
+		return nil, err
+	}
+	feedForwardOutput, err := b.mlp.Forward(normResidual)
+	if err != nil {
+		return nil, err
+	}
+	return tensor.Add(withAttentionResidual, feedForwardOutput)
+}
+
+func (f *feedForward) Forward(input *tensor.Tensor) (*tensor.Tensor, error) {
+	expanded, err := tensor.MatMul(input, f.upWeights)
+	if err != nil {
+		return nil, err
+	}
+	activated, err := tensor.GELUApprox(expanded)
+	if err != nil {
+		return nil, err
+	}
+	return tensor.MatMul(activated, f.downWeights)
+}
+
+func newFeedForward(modelDim, hiddenDim, seed int) (*feedForward, error) {
+	upWeights, err := newWeightMatrix(modelDim, hiddenDim, seed)
+	if err != nil {
+		return nil, err
+	}
+	downWeights, err := newWeightMatrix(hiddenDim, modelDim, seed+1)
+	if err != nil {
+		return nil, err
+	}
+	return &feedForward{
+		upWeights:   upWeights,
+		downWeights: downWeights,
+	}, nil
+}
+
+func layerNormRows(t *tensor.Tensor, epsilon float64) (*tensor.Tensor, error) {
+	shape := t.Shape()
+	if len(shape) != 2 {
+		return nil, fmt.Errorf("layerNormRows requires rank-2 tensor, got %v", shape)
+	}
+	rows, cols := shape[0], shape[1]
+	out, err := tensor.New(rows, cols)
+	if err != nil {
+		return nil, err
+	}
+	for row := 0; row < rows; row++ {
+		rowValues := make([]float64, cols)
+		for col := 0; col < cols; col++ {
+			value, err := t.At(row, col)
+			if err != nil {
+				return nil, err
+			}
+			rowValues[col] = value
+		}
+		rowTensor, err := tensor.FromSlice(rowValues, cols)
+		if err != nil {
+			return nil, err
+		}
+		normRow, err := tensor.LayerNorm(rowTensor, epsilon)
+		if err != nil {
+			return nil, err
+		}
+		for col := 0; col < cols; col++ {
+			value, err := normRow.At(col)
 			if err != nil {
 				return nil, err
 			}
@@ -110,54 +225,34 @@ func (m *TinyTransformer) embed(tokens []int) (*tensor.Tensor, error) {
 	return out, nil
 }
 
-func (b block) apply(input *tensor.Tensor) (*tensor.Tensor, error) {
-	row, err := tensor.FromSlice(input.Data(), 1, len(input.Data()))
-	if err != nil {
-		return nil, err
-	}
-	projected, err := tensor.MatMul(row, b.linear)
-	if err != nil {
-		return nil, err
-	}
-	activated, err := tensor.GELUApprox(projected)
-	if err != nil {
-		return nil, err
-	}
-	activatedVec, err := flattenRow(activated)
-	if err != nil {
-		return nil, err
-	}
-	residual, err := tensor.Add(input, activatedVec)
-	if err != nil {
-		return nil, err
-	}
-	return tensor.LayerNorm(residual, 1e-5)
-}
-
-func meanRows(t *tensor.Tensor) (*tensor.Tensor, error) {
+func selectRow(t *tensor.Tensor, row int) (*tensor.Tensor, error) {
 	shape := t.Shape()
 	if len(shape) != 2 {
-		return nil, fmt.Errorf("meanRows requires rank-2 tensor, got %v", shape)
+		return nil, fmt.Errorf("selectRow requires rank-2 tensor, got %v", shape)
 	}
-	rows, cols := shape[0], shape[1]
-	out, err := tensor.New(cols)
-	if err != nil {
-		return nil, err
+	if row < 0 || row >= shape[0] {
+		return nil, fmt.Errorf("row %d out of bounds for tensor with %d rows", row, shape[0])
 	}
-	for col := 0; col < cols; col++ {
-		sum := 0.0
-		for row := 0; row < rows; row++ {
-			value, err := t.At(row, col)
-			if err != nil {
-				return nil, err
-			}
-			sum += value
-		}
-		if err := out.Set(sum/float64(rows), col); err != nil {
+	values := make([]float64, shape[1])
+	for col := 0; col < shape[1]; col++ {
+		value, err := t.At(row, col)
+		if err != nil {
 			return nil, err
 		}
+		values[col] = value
 	}
-	return out, nil
+	return tensor.FromSlice(values, shape[1])
+}
+
+func newPositionEmbeddingMatrix(contextLength, dim int) (*tensor.Tensor, error) {
+	data := make([]float64, contextLength*dim)
+	for pos := 0; pos < contextLength; pos++ {
+		for col := 0; col < dim; col++ {
+			idx := pos*dim + col
+			data[idx] = float64(((pos+1)*(col+5))%13-6) / 16.0
+		}
+	}
+	return tensor.FromSlice(data, contextLength, dim)
 }
 
 func project(vector *tensor.Tensor, weights *tensor.Tensor) (*tensor.Tensor, error) {
