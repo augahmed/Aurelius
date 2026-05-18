@@ -153,6 +153,32 @@ func TestEngineRejectsInvalidMaxTokens(t *testing.T) {
 	}
 }
 
+func TestEngineRejectsInvalidTemperature(t *testing.T) {
+	engine, err := newTestEngine(t)
+	if err != nil {
+		t.Fatalf("NewEngine error: %v", err)
+	}
+	if _, err := engine.GenerateWithOptions("hi", GenerateOptions{
+		MaxTokens:   1,
+		Temperature: -0.5,
+	}); err == nil {
+		t.Fatal("expected invalid temperature error")
+	}
+}
+
+func TestEngineRejectsInvalidTopK(t *testing.T) {
+	engine, err := newTestEngine(t)
+	if err != nil {
+		t.Fatalf("NewEngine error: %v", err)
+	}
+	if _, err := engine.GenerateWithOptions("hi", GenerateOptions{
+		MaxTokens: 1,
+		TopK:      -1,
+	}); err == nil {
+		t.Fatal("expected invalid top-k error")
+	}
+}
+
 func newTestEngine(t *testing.T) (*Engine, error) {
 	t.Helper()
 	model, err := newTinyModel()

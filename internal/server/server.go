@@ -32,10 +32,12 @@ type ChatMessage struct {
 }
 
 type GenerateRequest struct {
-	Prompt    string        `json:"prompt"`
-	MaxTokens int           `json:"max_tokens"`
-	UseCache  bool          `json:"use_cache"`
-	Messages  []ChatMessage `json:"messages"`
+	Prompt      string        `json:"prompt"`
+	MaxTokens   int           `json:"max_tokens"`
+	Temperature float64       `json:"temperature"`
+	TopK        int           `json:"top_k"`
+	UseCache    bool          `json:"use_cache"`
+	Messages    []ChatMessage `json:"messages"`
 }
 
 type GenerateResponse struct {
@@ -43,12 +45,18 @@ type GenerateResponse struct {
 }
 
 type GeneratePolicy struct {
-	DefaultMaxTokens int
-	MaxTokensCap     int
-	MaxMessages      int
-	MaxMessageRunes  int
-	MaxPromptRunes   int
-	DisableCache     bool
+	DefaultMaxTokens   int
+	MaxTokensCap       int
+	DefaultTemperature float64
+	MinTemperature     float64
+	MaxTemperature     float64
+	DefaultTopK        int
+	MaxTopK            int
+	MaxMessages        int
+	MaxMessageRunes    int
+	MaxPromptRunes     int
+	AssistantPreamble  string
+	DisableCache       bool
 }
 
 type Option func(*Server)
@@ -118,15 +126,17 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req = applyGeneratePolicy(req, s.policy)
-	prompt, err := buildPrompt(req)
+	prompt, err := buildPrompt(req, s.policy)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	options := s.resolveGenerateOptions(req)
 	output, err := s.engine.GenerateWithOptions(prompt, runtime.GenerateOptions{
-		MaxTokens: options.MaxTokens,
-		UseCache:  options.UseCache,
+		MaxTokens:   options.MaxTokens,
+		TopK:        options.TopK,
+		UseCache:    options.UseCache,
+		Temperature: options.Temperature,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -138,16 +148,24 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func buildPrompt(req GenerateRequest) (string, error) {
+func buildPrompt(req GenerateRequest, policy GeneratePolicy) (string, error) {
+	preamble := strings.TrimSpace(policy.AssistantPreamble)
 	if len(req.Messages) == 0 {
 		prompt := strings.TrimSpace(req.Prompt)
 		if prompt == "" {
 			return "", fmt.Errorf("prompt cannot be empty")
 		}
-		return prompt, nil
+		if preamble == "" {
+			return prompt, nil
+		}
+		return preamble + "\n\nUser: " + prompt + "\n\nAssistant:", nil
 	}
 
 	var builder strings.Builder
+	if preamble != "" {
+		builder.WriteString(preamble)
+		builder.WriteString("\n\n")
+	}
 	for _, message := range req.Messages {
 		content := strings.TrimSpace(message.Content)
 		if content == "" {
@@ -202,8 +220,10 @@ func (s *Server) resolveGenerateOptions(req GenerateRequest) runtime.GenerateOpt
 	}
 
 	return runtime.GenerateOptions{
-		MaxTokens: maxTokens,
-		UseCache:  useCache,
+		MaxTokens:   maxTokens,
+		TopK:        resolveTopK(req.TopK, s.policy),
+		UseCache:    useCache,
+		Temperature: resolveTemperature(req.Temperature, s.policy),
 	}
 }
 
@@ -240,4 +260,35 @@ func trimTrailingRunes(value string, maxRunes int) string {
 		return value
 	}
 	return string(runes[len(runes)-maxRunes:])
+}
+
+func resolveTemperature(requested float64, policy GeneratePolicy) float64 {
+	temperature := requested
+	if temperature == 0 && policy.DefaultTemperature > 0 {
+		temperature = policy.DefaultTemperature
+	}
+	if temperature <= 0 {
+		return 0
+	}
+	if policy.MinTemperature > 0 && temperature < policy.MinTemperature {
+		temperature = policy.MinTemperature
+	}
+	if policy.MaxTemperature > 0 && temperature > policy.MaxTemperature {
+		temperature = policy.MaxTemperature
+	}
+	return temperature
+}
+
+func resolveTopK(requested int, policy GeneratePolicy) int {
+	topK := requested
+	if topK <= 0 && policy.DefaultTopK > 0 {
+		topK = policy.DefaultTopK
+	}
+	if topK <= 0 {
+		return 0
+	}
+	if policy.MaxTopK > 0 && topK > policy.MaxTopK {
+		topK = policy.MaxTopK
+	}
+	return topK
 }

@@ -226,12 +226,18 @@ func TestBuildServeGeneratorUsesStopTokenDefaults(t *testing.T) {
 func TestServeGeneratePolicyForGPT2(t *testing.T) {
 	got := serveGeneratePolicy("gpt2")
 	want := server.GeneratePolicy{
-		DefaultMaxTokens: 2,
-		MaxTokensCap:     2,
-		MaxMessages:      6,
-		MaxMessageRunes:  240,
-		MaxPromptRunes:   480,
-		DisableCache:     true,
+		DefaultMaxTokens:   8,
+		MaxTokensCap:       12,
+		DefaultTemperature: 0.8,
+		MinTemperature:     0.2,
+		MaxTemperature:     1.2,
+		DefaultTopK:        40,
+		MaxTopK:            80,
+		MaxMessages:        6,
+		MaxMessageRunes:    240,
+		MaxPromptRunes:     480,
+		AssistantPreamble:  "You are a helpful assistant. Answer directly and completely.",
+		DisableCache:       true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("serveGeneratePolicy() = %+v, want %+v", got, want)

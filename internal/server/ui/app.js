@@ -5,6 +5,8 @@ const chatHistory = document.getElementById("chat-history");
 const chatForm = document.getElementById("chat-form");
 const promptInput = document.getElementById("prompt-input");
 const maxTokensInput = document.getElementById("max-tokens");
+const temperatureInput = document.getElementById("temperature");
+const topKInput = document.getElementById("top-k");
 const useCacheInput = document.getElementById("use-cache");
 const submitButton = document.getElementById("submit-button");
 const statusText = document.getElementById("status-text");
@@ -27,6 +29,8 @@ chatForm.addEventListener("submit", async (event) => {
 
   const prompt = promptInput.value.trim();
   const maxTokens = normalizeMaxTokens();
+  const temperature = normalizeTemperature();
+  const topK = normalizeTopK();
   const useCache = useCacheInput.checked;
 
   if (!prompt) {
@@ -62,6 +66,8 @@ chatForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({
         prompt,
         max_tokens: maxTokens,
+        temperature,
+        top_k: topK,
         use_cache: useCache,
         messages: state.messages,
       }),
@@ -129,6 +135,8 @@ function persistMessages() {
 function persistSettings() {
   const settings = {
     maxTokens: String(normalizeMaxTokens()),
+    temperature: String(normalizeTemperature()),
+    topK: String(normalizeTopK()),
     useCache: useCacheInput.checked,
   };
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -144,6 +152,12 @@ function applySettings() {
     if (typeof settings.maxTokens === "string") {
       maxTokensInput.value = settings.maxTokens;
     }
+    if (typeof settings.temperature === "string") {
+      temperatureInput.value = settings.temperature;
+    }
+    if (typeof settings.topK === "string") {
+      topKInput.value = settings.topK;
+    }
     if (typeof settings.useCache === "boolean") {
       useCacheInput.checked = settings.useCache;
     }
@@ -151,6 +165,8 @@ function applySettings() {
     // Ignore invalid saved settings.
   }
   normalizeMaxTokens();
+  normalizeTemperature();
+  normalizeTopK();
 }
 
 function renderMessages() {
@@ -252,9 +268,9 @@ function scrollToBottom() {
 }
 
 function normalizeMaxTokens() {
-  const fallback = Number(maxTokensInput.defaultValue || "2");
+  const fallback = Number(maxTokensInput.defaultValue || "8");
   const min = Number(maxTokensInput.min || "0");
-  const max = Number(maxTokensInput.max || "32");
+  const max = Number(maxTokensInput.max || "12");
   let value = Number(maxTokensInput.value);
 
   if (!Number.isFinite(value)) {
@@ -262,5 +278,33 @@ function normalizeMaxTokens() {
   }
   value = Math.max(min, Math.min(max, Math.trunc(value)));
   maxTokensInput.value = String(value);
+  return value;
+}
+
+function normalizeTemperature() {
+  const fallback = Number(temperatureInput.defaultValue || "0.8");
+  const min = Number(temperatureInput.min || "0");
+  const max = Number(temperatureInput.max || "1.5");
+  let value = Number(temperatureInput.value);
+
+  if (!Number.isFinite(value)) {
+    value = fallback;
+  }
+  value = Math.max(min, Math.min(max, Math.round(value * 10) / 10));
+  temperatureInput.value = String(value);
+  return value;
+}
+
+function normalizeTopK() {
+  const fallback = Number(topKInput.defaultValue || "40");
+  const min = Number(topKInput.min || "0");
+  const max = Number(topKInput.max || "80");
+  let value = Number(topKInput.value);
+
+  if (!Number.isFinite(value)) {
+    value = fallback;
+  }
+  value = Math.max(min, Math.min(max, Math.trunc(value)));
+  topKInput.value = String(value);
   return value;
 }

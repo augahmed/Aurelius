@@ -52,6 +52,8 @@ func runGenerate(args []string, stdout io.Writer, stderr io.Writer) int {
 
 	prompt := flags.String("prompt", "", "prompt text to generate from")
 	maxTokens := flags.Int("max-tokens", 10, "number of tokens to generate")
+	temperature := flags.Float64("temperature", 0, "sampling temperature; 0 keeps the default sampler")
+	topK := flags.Int("top-k", 0, "limit token sampling to the top-k logits; 0 disables top-k sampling")
 	useCache := flags.Bool("use-cache", false, "use model KV cache when the selected model supports it")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "parse flags: %v\n", err)
@@ -70,8 +72,10 @@ func runGenerate(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	output, err := engine.GenerateWithOptions(*prompt, runtime.GenerateOptions{
-		MaxTokens: *maxTokens,
-		UseCache:  *useCache,
+		MaxTokens:   *maxTokens,
+		TopK:        *topK,
+		UseCache:    *useCache,
+		Temperature: *temperature,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "generate: %v\n", err)
@@ -91,6 +95,8 @@ func runGenerateGPT2(args []string, stdout io.Writer, stderr io.Writer) int {
 	mergesPath := flags.String("merges", "", "path to GPT-2 merges.txt")
 	prompt := flags.String("prompt", "", "prompt text to generate from")
 	maxTokens := flags.Int("max-tokens", 1, "number of tokens to generate")
+	temperature := flags.Float64("temperature", 0, "sampling temperature; 0 keeps greedy decoding")
+	topK := flags.Int("top-k", 0, "limit token sampling to the top-k logits; 0 disables top-k sampling")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "parse flags: %v\n", err)
 		return 2
@@ -120,8 +126,10 @@ func runGenerateGPT2(args []string, stdout io.Writer, stderr io.Writer) int {
 
 	stopTokens := gpt2StopTokens(assets.config)
 	output, err := engine.GenerateWithOptions(*prompt, runtime.GenerateOptions{
-		MaxTokens:  *maxTokens,
-		StopTokens: stopTokens,
+		MaxTokens:   *maxTokens,
+		TopK:        *topK,
+		StopTokens:  stopTokens,
+		Temperature: *temperature,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "generate-gpt2: %v\n", err)
@@ -589,12 +597,18 @@ func serveGeneratePolicy(backend string) server.GeneratePolicy {
 	switch backend {
 	case "gpt2":
 		return server.GeneratePolicy{
-			DefaultMaxTokens: 2,
-			MaxTokensCap:     2,
-			MaxMessages:      6,
-			MaxMessageRunes:  240,
-			MaxPromptRunes:   480,
-			DisableCache:     true,
+			DefaultMaxTokens:   8,
+			MaxTokensCap:       12,
+			DefaultTemperature: 0.8,
+			MinTemperature:     0.2,
+			MaxTemperature:     1.2,
+			DefaultTopK:        40,
+			MaxTopK:            80,
+			MaxMessages:        6,
+			MaxMessageRunes:    240,
+			MaxPromptRunes:     480,
+			AssistantPreamble:  "You are a helpful assistant. Answer directly and completely.",
+			DisableCache:       true,
 		}
 	default:
 		return server.GeneratePolicy{}

@@ -86,26 +86,79 @@ func TestServerGenerateWithMessagesBuildsConversationPrompt(t *testing.T) {
 	}
 }
 
-func TestServerGenerateAppliesPolicyToOptions(t *testing.T) {
+func TestServerGenerateWithMessagesUsesAssistantPreamble(t *testing.T) {
 	engine := &fakeGenerator{outputSuffix: "reply"}
 	srv := New(engine, WithGeneratePolicy(GeneratePolicy{
-		DefaultMaxTokens: 2,
-		MaxTokensCap:     2,
-		DisableCache:     true,
+		AssistantPreamble: "You are a helpful assistant. Answer directly and completely.",
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"hello","max_tokens":32,"use_cache":true}`))
+	body := `{"max_tokens":4,"messages":[{"role":"user","content":"what is 2 + 2?"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d, body = %q", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if engine.options.MaxTokens != 2 {
-		t.Fatalf("options.MaxTokens = %d, want %d", engine.options.MaxTokens, 2)
+	wantPrompt := "You are a helpful assistant. Answer directly and completely.\n\nUser: what is 2 + 2?\n\nAssistant:"
+	if engine.prompt != wantPrompt {
+		t.Fatalf("prompt = %q, want %q", engine.prompt, wantPrompt)
+	}
+}
+
+func TestServerGenerateAppliesPolicyToOptions(t *testing.T) {
+	engine := &fakeGenerator{outputSuffix: "reply"}
+	srv := New(engine, WithGeneratePolicy(GeneratePolicy{
+		DefaultMaxTokens:   8,
+		MaxTokensCap:       12,
+		DefaultTemperature: 0.8,
+		MinTemperature:     0.2,
+		MaxTemperature:     1.2,
+		DefaultTopK:        20,
+		MaxTopK:            40,
+		DisableCache:       true,
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"hello","max_tokens":32,"temperature":9,"top_k":100,"use_cache":true}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if engine.options.MaxTokens != 12 {
+		t.Fatalf("options.MaxTokens = %d, want %d", engine.options.MaxTokens, 12)
+	}
+	if engine.options.Temperature != 1.2 {
+		t.Fatalf("options.Temperature = %f, want %f", engine.options.Temperature, 1.2)
+	}
+	if engine.options.TopK != 40 {
+		t.Fatalf("options.TopK = %d, want %d", engine.options.TopK, 40)
 	}
 	if engine.options.UseCache {
 		t.Fatal("expected use_cache to be disabled by policy")
+	}
+}
+
+func TestServerGenerateUsesDefaultTemperatureWhenUnset(t *testing.T) {
+	engine := &fakeGenerator{outputSuffix: "reply"}
+	srv := New(engine, WithGeneratePolicy(GeneratePolicy{
+		DefaultTemperature: 0.8,
+		DefaultTopK:        20,
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"hello","max_tokens":4}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if engine.options.Temperature != 0.8 {
+		t.Fatalf("options.Temperature = %f, want %f", engine.options.Temperature, 0.8)
+	}
+	if engine.options.TopK != 20 {
+		t.Fatalf("options.TopK = %d, want %d", engine.options.TopK, 20)
 	}
 }
 

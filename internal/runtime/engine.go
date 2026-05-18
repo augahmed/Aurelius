@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"fmt"
+	"math/rand"
+	"time"
 
 	"github.com/augahmed/aurelius/internal/model"
 	"github.com/augahmed/aurelius/internal/sampler"
@@ -15,9 +17,11 @@ type Engine struct {
 }
 
 type GenerateOptions struct {
-	MaxTokens  int
-	UseCache   bool
-	StopTokens []int
+	MaxTokens   int
+	UseCache    bool
+	StopTokens  []int
+	Temperature float64
+	TopK        int
 }
 
 func NewEngine(tok tokenizer.Tokenizer, mdl model.Model, samp sampler.Sampler) (*Engine, error) {
@@ -68,12 +72,16 @@ func (e *Engine) GenerateWithOptions(prompt string, options GenerateOptions) (st
 
 func (e *Engine) generateWithoutCache(tokens []int, options GenerateOptions) (string, error) {
 	cache := model.NoopCache{}
+	nextTokenSampler, err := e.samplerForOptions(options)
+	if err != nil {
+		return "", err
+	}
 	for i := 0; i < options.MaxTokens; i++ {
 		logits, err := e.model.Forward(tokens, cache)
 		if err != nil {
 			return "", err
 		}
-		next, err := e.sampler.Sample(logits)
+		next, err := nextTokenSampler.Sample(logits)
 		if err != nil {
 			return "", err
 		}
@@ -89,6 +97,10 @@ func (e *Engine) generateWithCache(tokens []int, options GenerateOptions, cacheM
 	if options.MaxTokens == 0 {
 		return e.tokenizer.Decode(tokens)
 	}
+	nextTokenSampler, err := e.samplerForOptions(options)
+	if err != nil {
+		return "", err
+	}
 
 	cache := cacheModel.NewCache()
 	logits, err := cacheModel.Forward(tokens, cache)
@@ -97,7 +109,7 @@ func (e *Engine) generateWithCache(tokens []int, options GenerateOptions, cacheM
 	}
 
 	for i := 0; i < options.MaxTokens; i++ {
-		next, err := e.sampler.Sample(logits)
+		next, err := nextTokenSampler.Sample(logits)
 		if err != nil {
 			return "", err
 		}
@@ -114,6 +126,29 @@ func (e *Engine) generateWithCache(tokens []int, options GenerateOptions, cacheM
 		}
 	}
 	return e.tokenizer.Decode(tokens)
+}
+
+func (e *Engine) samplerForOptions(options GenerateOptions) (sampler.Sampler, error) {
+	if options.TopK < 0 {
+		return nil, fmt.Errorf("top-k must be non-negative")
+	}
+	if options.Temperature < 0 {
+		return nil, fmt.Errorf("temperature must be non-negative")
+	}
+	if options.TopK > 0 {
+		if options.TopK == 1 {
+			return sampler.NewGreedySampler(), nil
+		}
+		temperature := options.Temperature
+		if temperature == 0 {
+			temperature = 1.0
+		}
+		return sampler.NewTopKSampler(options.TopK, temperature, rand.New(rand.NewSource(time.Now().UnixNano()))), nil
+	}
+	if options.Temperature == 0 {
+		return e.sampler, nil
+	}
+	return sampler.NewTemperatureSampler(options.Temperature, rand.New(rand.NewSource(time.Now().UnixNano()))), nil
 }
 
 func shouldStop(token int, stopTokens []int) bool {
