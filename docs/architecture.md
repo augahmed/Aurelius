@@ -39,6 +39,9 @@ tokenizer.Decode
     |
     v
 generated text
+    |
+    v
+local web UI
 ```
 
 ## Current Prototype Design
@@ -52,7 +55,7 @@ Current implementation boundaries:
 - `internal/runtime` owns the autoregressive loop and chooses between uncached full-sequence decoding and optional cache-backed incremental decoding.
 - `internal/tokenizer` currently uses a byte-level tokenizer for simplicity and full input coverage.
 - `internal/tensor` exposes the minimal operations needed for the tiny model and future incremental expansion.
-- `internal/server` provides API skeletons without committing to a transport design too early.
+- `internal/server` serves the local web app, the JSON generation API, and the health endpoint.
 
 ## Transformer Component Layout
 
@@ -70,11 +73,23 @@ The transformer package is now split into explicit subcomponents:
 
 If a model does not implement the cache-capable extension, runtime generation falls back to the original full-sequence decoding path automatically.
 
+## Local Web App
+
+The first Aurelius webpage is served directly by Go from embedded static assets. The current browser flow is intentionally simple:
+
+- the frontend keeps chat history in `localStorage`
+- the frontend sends the visible conversation plus the newest user prompt to `/generate`
+- the server converts that conversation into a prompt string for the runtime engine
+- the server returns only the generated assistant continuation
+
+This keeps state management lightweight while preserving a clean boundary between the UI, HTTP layer, and generation runtime.
+
 ## Future Milestones
 
 - Real BPE tokenizer
 - GPT-2 weight loading
 - Cache-aware benchmarking and profiling
+- Streaming chat responses
 - Streaming API
 - Benchmarking
 - Batching

@@ -1,0 +1,439 @@
+:root {
+  --bg: #090707;
+  --bg-elevated: rgba(28, 14, 16, 0.88);
+  --panel: rgba(19, 10, 11, 0.92);
+  --panel-strong: rgba(24, 11, 13, 0.98);
+  --line: rgba(126, 40, 53, 0.35);
+  --line-strong: rgba(160, 58, 74, 0.6);
+  --text: #f6eded;
+  --muted: #c9b1b6;
+  --accent: #7e2432;
+  --accent-strong: #a73a4f;
+  --assistant: rgba(65, 24, 31, 0.72);
+  --user: rgba(18, 18, 18, 0.95);
+  --shadow: 0 28px 70px rgba(0, 0, 0, 0.45);
+  --radius-xl: 28px;
+  --radius-lg: 20px;
+  --radius-md: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top left, rgba(126, 36, 50, 0.18), transparent 28%),
+    radial-gradient(circle at right, rgba(89, 20, 33, 0.12), transparent 30%),
+    linear-gradient(180deg, #11090a 0%, #060505 100%);
+  color: var(--text);
+}
+
+body {
+  font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+}
+
+.app-shell {
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+  padding: 40px 28px 32px;
+}
+
+.backdrop {
+  position: absolute;
+  border-radius: 999px;
+  filter: blur(24px);
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.backdrop-left {
+  top: 92px;
+  left: -110px;
+  width: 320px;
+  height: 320px;
+  background: rgba(126, 36, 50, 0.24);
+}
+
+.backdrop-right {
+  right: -70px;
+  bottom: 90px;
+  width: 300px;
+  height: 300px;
+  background: rgba(90, 22, 34, 0.24);
+}
+
+.hero,
+.layout {
+  position: relative;
+  z-index: 1;
+}
+
+.hero {
+  display: grid;
+  gap: 14px;
+  margin: 0 auto 26px;
+  max-width: 1400px;
+  animation: fade-slide 460ms ease;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
+  background: linear-gradient(145deg, rgba(167, 58, 79, 0.95), rgba(71, 14, 23, 0.95));
+  box-shadow: 0 18px 40px rgba(88, 16, 28, 0.35);
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.eyebrow,
+.panel-label,
+.message-meta,
+.status-text {
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+}
+
+.eyebrow,
+.panel-label {
+  color: var(--accent-strong);
+  margin: 0 0 6px;
+}
+
+.hero h1,
+.panel-header h2,
+.empty-title {
+  margin: 0;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+}
+
+.hero h1 {
+  font-size: clamp(2rem, 4vw, 3.75rem);
+  line-height: 0.96;
+}
+
+.hero-copy {
+  max-width: 760px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 1.02rem;
+  line-height: 1.7;
+}
+
+.layout {
+  display: grid;
+  gap: 22px;
+  grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.9fr);
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.chat-panel,
+.control-panel {
+  background: linear-gradient(180deg, var(--panel-strong), var(--panel));
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+}
+
+.chat-panel {
+  min-height: 72vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 22px 24px 16px;
+  border-bottom: 1px solid rgba(126, 40, 53, 0.18);
+}
+
+.ghost-button,
+.primary-button {
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.ghost-button {
+  padding: 10px 16px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--muted);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.ghost-button:hover,
+.primary-button:hover {
+  transform: translateY(-1px);
+}
+
+.chat-history {
+  flex: 1;
+  overflow: auto;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.empty-state {
+  margin: auto;
+  max-width: 460px;
+  text-align: center;
+  padding: 26px;
+  border: 1px dashed rgba(167, 58, 79, 0.3);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.empty-title {
+  font-size: 1.3rem;
+}
+
+.empty-copy {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.message {
+  max-width: 78%;
+  padding: 16px 18px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  animation: message-in 220ms ease;
+}
+
+.message.user {
+  align-self: flex-end;
+  background: var(--user);
+}
+
+.message.assistant {
+  align-self: flex-start;
+  background: var(--assistant);
+  border-color: rgba(167, 58, 79, 0.28);
+}
+
+.message.pending {
+  opacity: 0.72;
+}
+
+.message-meta {
+  color: var(--accent-strong);
+  margin-bottom: 10px;
+}
+
+.message-body {
+  line-height: 1.7;
+  font-size: 0.98rem;
+  word-break: break-word;
+}
+
+.message-body p {
+  margin: 0 0 12px;
+}
+
+.message-body p:last-child {
+  margin-bottom: 0;
+}
+
+.message-body code {
+  font-family: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
+  background: rgba(0, 0, 0, 0.28);
+  padding: 2px 6px;
+  border-radius: 8px;
+}
+
+.message-body pre {
+  margin: 0 0 12px;
+  padding: 14px;
+  overflow-x: auto;
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.message-body pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.message-body a {
+  color: #f6c2ca;
+}
+
+.control-panel {
+  padding: 0 24px 24px;
+}
+
+.chat-form {
+  display: grid;
+  gap: 18px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field textarea,
+.field input {
+  width: 100%;
+  border: 1px solid rgba(167, 58, 79, 0.28);
+  border-radius: var(--radius-md);
+  background: rgba(8, 6, 6, 0.88);
+  color: var(--text);
+  padding: 14px 16px;
+  font: inherit;
+}
+
+.field textarea {
+  min-height: 164px;
+  resize: vertical;
+}
+
+.field textarea:focus,
+.field input:focus {
+  outline: 2px solid rgba(167, 58, 79, 0.5);
+  border-color: transparent;
+}
+
+.toggle {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.toggle input {
+  margin-top: 4px;
+  accent-color: var(--accent-strong);
+}
+
+.toggle-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.toggle-copy small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.form-actions {
+  display: flex;
+}
+
+.primary-button {
+  width: 100%;
+  padding: 14px 20px;
+  background: linear-gradient(135deg, var(--accent-strong), var(--accent));
+  color: white;
+  font-weight: 600;
+  box-shadow: 0 16px 34px rgba(104, 28, 41, 0.38);
+}
+
+.primary-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+  transform: none;
+}
+
+.status-text {
+  min-height: 1.2em;
+  margin: 0;
+  color: var(--muted);
+}
+
+.status-text[data-error="true"] {
+  color: #f6a8b5;
+}
+
+@keyframes fade-slide {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes message-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-panel {
+    min-height: 56vh;
+  }
+
+  .message {
+    max-width: 90%;
+  }
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    padding: 20px 14px 18px;
+  }
+
+  .brand {
+    align-items: flex-start;
+  }
+
+  .brand-mark {
+    width: 52px;
+    height: 52px;
+    font-size: 1.5rem;
+  }
+
+  .panel-header,
+  .control-panel {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .chat-history {
+    padding: 16px;
+  }
+
+  .message {
+    max-width: 100%;
+  }
+}
