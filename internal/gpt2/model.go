@@ -167,22 +167,34 @@ func (m *Model) Config() sharedmodel.Config {
 	return m.cfg.ModelConfig()
 }
 
-func (m *Model) Forward(input []int, _ sharedmodel.Cache) ([]float64, error) {
+func (m *Model) NewCache() sharedmodel.Cache {
+	return NewTransformerCache(m.cfg.NumLayers)
+}
+
+func (m *Model) Forward(input []int, cache sharedmodel.Cache) ([]float64, error) {
 	if len(input) == 0 {
 		return nil, fmt.Errorf("input token sequence cannot be empty")
 	}
-	if len(input) > m.cfg.ResolvedContextLength() {
-		return nil, fmt.Errorf("input length %d exceeds context length %d", len(input), m.cfg.ResolvedContextLength())
+	transformerCache := cacheFromModelCache(cache)
+	positionOffset := 0
+	if transformerCache != nil {
+		positionOffset = transformerCache.SequenceLength()
+	}
+	if positionOffset+len(input) > m.cfg.ResolvedContextLength() {
+		return nil, fmt.Errorf("input length %d with cache length %d exceeds context length %d", len(input), positionOffset, m.cfg.ResolvedContextLength())
 	}
 
-	hidden, err := m.embed(input)
+	hidden, err := m.embed(input, positionOffset)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, block := range m.blocks {
+	for i, block := range m.blocks {
 		attentionInput := applyLayerNorm(hidden, len(input), m.cfg.EmbeddingDim, block.AttentionNorm, m.cfg.ResolvedLayerNormEpsilon())
-		attentionOutput := block.Attention.Forward(attentionInput, len(input), m.cfg.EmbeddingDim)
+		attentionOutput, err := block.Attention.Forward(attentionInput, len(input), m.cfg.EmbeddingDim, layerCache(transformerCache, i))
+		if err != nil {
+			return nil, err
+		}
 		addInPlace(hidden, attentionOutput)
 
 		mlpInput := applyLayerNorm(hidden, len(input), m.cfg.EmbeddingDim, block.MLPNorm, m.cfg.ResolvedLayerNormEpsilon())
@@ -205,7 +217,7 @@ func (m *Model) Forward(input []int, _ sharedmodel.Cache) ([]float64, error) {
 	return logits, nil
 }
 
-func (m *Model) embed(tokens []int) ([]float64, error) {
+func (m *Model) embed(tokens []int, positionOffset int) ([]float64, error) {
 	hidden := make([]float64, len(tokens)*m.cfg.EmbeddingDim)
 	for position, token := range tokens {
 		if token < 0 || token >= m.cfg.VocabSize {
@@ -214,13 +226,13 @@ func (m *Model) embed(tokens []int) ([]float64, error) {
 		for dim := 0; dim < m.cfg.EmbeddingDim; dim++ {
 			hidden[position*m.cfg.EmbeddingDim+dim] =
 				m.tokenEmbeddings.Data[token*m.cfg.EmbeddingDim+dim] +
-					m.positionEmbedding.Data[position*m.cfg.EmbeddingDim+dim]
+					m.positionEmbedding.Data[(positionOffset+position)*m.cfg.EmbeddingDim+dim]
 		}
 	}
 	return hidden, nil
 }
 
-func (a Attention) Forward(hidden []float64, seqLen, embDim int) []float64 {
+func (a Attention) Forward(hidden []float64, seqLen, embDim int, cache *KVCache) ([]float64, error) {
 	qkv := affineRows(hidden, seqLen, embDim, a.CombinedWeight, a.CombinedBias)
 	queries := make([]float64, seqLen*embDim)
 	keys := make([]float64, seqLen*embDim)
@@ -232,18 +244,28 @@ func (a Attention) Forward(hidden []float64, seqLen, embDim int) []float64 {
 		copy(values[row*embDim:(row+1)*embDim], qkv[offset+2*embDim:offset+3*embDim])
 	}
 
+	pastLength := 0
+	contextKeys := keys
+	contextValues := values
+	if cache != nil && cache.SequenceLength() > 0 {
+		pastLength = cache.SequenceLength()
+		contextKeys = concatRows(cache.Keys, keys)
+		contextValues = concatRows(cache.Values, values)
+	}
+
 	headDim := embDim / a.NumHeads
 	context := make([]float64, seqLen*embDim)
 	scale := math.Sqrt(float64(headDim))
 	for row := 0; row < seqLen; row++ {
 		for head := 0; head < a.NumHeads; head++ {
 			headOffset := head * headDim
-			scores := make([]float64, row+1)
+			visibleKeys := pastLength + row + 1
+			scores := make([]float64, visibleKeys)
 			maxScore := math.Inf(-1)
-			for keyRow := 0; keyRow <= row; keyRow++ {
+			for keyRow := 0; keyRow < visibleKeys; keyRow++ {
 				dot := 0.0
 				for dim := 0; dim < headDim; dim++ {
-					dot += queries[row*embDim+headOffset+dim] * keys[keyRow*embDim+headOffset+dim]
+					dot += queries[row*embDim+headOffset+dim] * contextKeys[keyRow*embDim+headOffset+dim]
 				}
 				score := dot / scale
 				scores[keyRow] = score
@@ -262,13 +284,19 @@ func (a Attention) Forward(hidden []float64, seqLen, embDim int) []float64 {
 			for keyRow, weight := range scores {
 				normalized := weight / weightSum
 				for dim := 0; dim < headDim; dim++ {
-					context[row*embDim+headOffset+dim] += normalized * values[keyRow*embDim+headOffset+dim]
+					context[row*embDim+headOffset+dim] += normalized * contextValues[keyRow*embDim+headOffset+dim]
 				}
 			}
 		}
 	}
 
-	return affineRows(context, seqLen, embDim, a.ProjectWeight, a.ProjectBias)
+	if cache != nil {
+		if err := cache.Append(keys, values, seqLen, embDim); err != nil {
+			return nil, err
+		}
+	}
+
+	return affineRows(context, seqLen, embDim, a.ProjectWeight, a.ProjectBias), nil
 }
 
 func (m MLP) Forward(hidden []float64, seqLen, embDim int) []float64 {
@@ -326,10 +354,30 @@ func affineRows(hidden []float64, rows, inDim int, weight Tensor, bias []float64
 	return out
 }
 
+func concatRows(a, b []float64) []float64 {
+	if len(a) == 0 {
+		return append([]float64(nil), b...)
+	}
+	if len(b) == 0 {
+		return append([]float64(nil), a...)
+	}
+	combined := make([]float64, 0, len(a)+len(b))
+	combined = append(combined, a...)
+	combined = append(combined, b...)
+	return combined
+}
+
 func addInPlace(dst, src []float64) {
 	for i, value := range src {
 		dst[i] += value
 	}
+}
+
+func layerCache(cache *TransformerCache, index int) *KVCache {
+	if cache == nil {
+		return nil
+	}
+	return cache.Layer(index)
 }
 
 func gelu(value float64) float64 {

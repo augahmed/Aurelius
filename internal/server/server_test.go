@@ -116,7 +116,6 @@ func TestServerGenerateAppliesPolicyToOptions(t *testing.T) {
 		MaxTemperature:     1.2,
 		DefaultTopK:        20,
 		MaxTopK:            40,
-		DisableCache:       true,
 	}))
 
 	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"hello","max_tokens":32,"temperature":9,"top_k":100,"use_cache":true}`))
@@ -135,8 +134,8 @@ func TestServerGenerateAppliesPolicyToOptions(t *testing.T) {
 	if engine.options.TopK != 40 {
 		t.Fatalf("options.TopK = %d, want %d", engine.options.TopK, 40)
 	}
-	if engine.options.UseCache {
-		t.Fatal("expected use_cache to be disabled by policy")
+	if !engine.options.UseCache {
+		t.Fatal("expected use_cache to remain enabled")
 	}
 }
 

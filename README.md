@@ -98,7 +98,7 @@ The web UI provides:
 - browser-side history persisted in `localStorage`
 - basic markdown rendering for assistant responses
 
-When `serve` is using the GPT-2 backend, the web path now applies conservative request limits for responsiveness: a short assistant preamble, bounded temperature and top-k sampling, modest default reply length, capped generation length, trimmed conversation history, and cache disabled because the current GPT-2 path is still non-cached.
+When `serve` is using the GPT-2 backend, the web path now applies conservative request limits for responsiveness: a short assistant preamble, bounded temperature and top-k sampling, modest default reply length, capped generation length, trimmed conversation history, and cache-aware incremental decoding.
 
 ## Development Commands
 

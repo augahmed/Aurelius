@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	sharedmodel "github.com/augahmed/aurelius/internal/model"
 	"github.com/augahmed/aurelius/internal/tokenizer"
 )
 
@@ -56,6 +57,56 @@ func TestModelForwardMatchesReference(t *testing.T) {
 		if math.Abs(got[i]-want[i]) > 1e-6 {
 			t.Fatalf("logit[%d] = %.8f, want %.8f", i, got[i], want[i])
 		}
+	}
+}
+
+func TestModelForwardWithCacheMatchesFullForward(t *testing.T) {
+	cfg := tinyConfig()
+	state := tinyStateDict()
+
+	model, err := NewModel(cfg, state)
+	if err != nil {
+		t.Fatalf("NewModel error: %v", err)
+	}
+
+	cache := model.NewCache()
+	if _, ok := cache.(*TransformerCache); !ok {
+		t.Fatalf("cache type = %T, want *TransformerCache", cache)
+	}
+
+	if _, err := model.Forward([]int{7, 8}, cache); err != nil {
+		t.Fatalf("Forward(prefill) error: %v", err)
+	}
+
+	got, err := model.Forward([]int{5}, cache)
+	if err != nil {
+		t.Fatalf("Forward(incremental) error: %v", err)
+	}
+	want, err := model.Forward([]int{7, 8, 5}, nil)
+	if err != nil {
+		t.Fatalf("Forward(full) error: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("logit length = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if math.Abs(got[i]-want[i]) > 1e-6 {
+			t.Fatalf("logit[%d] = %.8f, want %.8f", i, got[i], want[i])
+		}
+	}
+}
+
+func TestModelImplementsCacheCapableModel(t *testing.T) {
+	cfg := tinyConfig()
+	state := tinyStateDict()
+
+	model, err := NewModel(cfg, state)
+	if err != nil {
+		t.Fatalf("NewModel error: %v", err)
+	}
+
+	if _, ok := any(model).(sharedmodel.CacheCapableModel); !ok {
+		t.Fatal("expected model to implement CacheCapableModel")
 	}
 }
 
@@ -229,7 +280,7 @@ func referenceForward(cfg Config, state map[string]Tensor, input []int) []float6
 		panic(err)
 	}
 
-	hidden, err := model.embed(input)
+	hidden, err := model.embed(input, 0)
 	if err != nil {
 		panic(err)
 	}

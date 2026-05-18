@@ -97,6 +97,7 @@ func runGenerateGPT2(args []string, stdout io.Writer, stderr io.Writer) int {
 	maxTokens := flags.Int("max-tokens", 1, "number of tokens to generate")
 	temperature := flags.Float64("temperature", 0, "sampling temperature; 0 keeps greedy decoding")
 	topK := flags.Int("top-k", 0, "limit token sampling to the top-k logits; 0 disables top-k sampling")
+	useCache := flags.Bool("use-cache", false, "use model KV cache when supported")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "parse flags: %v\n", err)
 		return 2
@@ -130,6 +131,7 @@ func runGenerateGPT2(args []string, stdout io.Writer, stderr io.Writer) int {
 		TopK:        *topK,
 		StopTokens:  stopTokens,
 		Temperature: *temperature,
+		UseCache:    *useCache,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "generate-gpt2: %v\n", err)
@@ -608,7 +610,6 @@ func serveGeneratePolicy(backend string) server.GeneratePolicy {
 			MaxMessageRunes:    240,
 			MaxPromptRunes:     480,
 			AssistantPreamble:  "You are a helpful assistant. Answer directly and completely.",
-			DisableCache:       true,
 		}
 	default:
 		return server.GeneratePolicy{}

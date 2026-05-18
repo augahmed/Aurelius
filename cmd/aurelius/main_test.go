@@ -85,6 +85,30 @@ func TestRunGenerateGPT2(t *testing.T) {
 	}
 }
 
+func TestRunGenerateGPT2WithCache(t *testing.T) {
+	assets := writeGPT2ModelAssets(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"generate-gpt2",
+		"-model-config", assets.configPath,
+		"-weights", assets.weightsPath,
+		"-vocab", assets.vocabPath,
+		"-merges", assets.mergesPath,
+		"-prompt", "hello!",
+		"-max-tokens", "1",
+		"-use-cache",
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.HasPrefix(stdout.String(), "hello!") {
+		t.Fatalf("stdout = %q, want GPT-2 generation output", stdout.String())
+	}
+}
+
 func TestRunEmitGPT2Observation(t *testing.T) {
 	assets := writeGPT2ModelAssets(t)
 
@@ -237,7 +261,6 @@ func TestServeGeneratePolicyForGPT2(t *testing.T) {
 		MaxMessageRunes:    240,
 		MaxPromptRunes:     480,
 		AssistantPreamble:  "You are a helpful assistant. Answer directly and completely.",
-		DisableCache:       true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("serveGeneratePolicy() = %+v, want %+v", got, want)
