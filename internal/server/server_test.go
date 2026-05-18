@@ -86,6 +86,68 @@ func TestServerGenerateWithMessagesBuildsConversationPrompt(t *testing.T) {
 	}
 }
 
+func TestServerGenerateAppliesPolicyToOptions(t *testing.T) {
+	engine := &fakeGenerator{outputSuffix: "reply"}
+	srv := New(engine, WithGeneratePolicy(GeneratePolicy{
+		DefaultMaxTokens: 2,
+		MaxTokensCap:     2,
+		DisableCache:     true,
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"hello","max_tokens":32,"use_cache":true}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if engine.options.MaxTokens != 2 {
+		t.Fatalf("options.MaxTokens = %d, want %d", engine.options.MaxTokens, 2)
+	}
+	if engine.options.UseCache {
+		t.Fatal("expected use_cache to be disabled by policy")
+	}
+}
+
+func TestServerGenerateTrimsConversationByPolicy(t *testing.T) {
+	engine := &fakeGenerator{outputSuffix: "reply"}
+	srv := New(engine, WithGeneratePolicy(GeneratePolicy{
+		MaxMessages:     2,
+		MaxMessageRunes: 3,
+	}))
+
+	body := `{"max_tokens":2,"messages":[{"role":"user","content":"alpha"},{"role":"assistant","content":"bravo"},{"role":"user","content":"charlie"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	wantPrompt := "Assistant: avo\n\nUser: lie\n\nAssistant:"
+	if engine.prompt != wantPrompt {
+		t.Fatalf("prompt = %q, want %q", engine.prompt, wantPrompt)
+	}
+}
+
+func TestServerGenerateTrimsDirectPromptByPolicy(t *testing.T) {
+	engine := &fakeGenerator{outputSuffix: "reply"}
+	srv := New(engine, WithGeneratePolicy(GeneratePolicy{
+		MaxPromptRunes: 5,
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"0123456789","max_tokens":1}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if engine.prompt != "56789" {
+		t.Fatalf("prompt = %q, want %q", engine.prompt, "56789")
+	}
+}
+
 func TestServerGenerateSanitizesNonDisplayableCompletion(t *testing.T) {
 	engine := &fakeGenerator{outputSuffix: "reply\x02\x00"}
 	srv := New(engine)

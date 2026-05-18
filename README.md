@@ -65,7 +65,11 @@ go run ./cmd/aurelius -prompt "hello world" -max-tokens 10
 go run ./cmd/aurelius -prompt "hello world" -max-tokens 10 -use-cache=true
 go run ./cmd/aurelius generate -prompt "hello world" -max-tokens 10 -use-cache=true
 go run ./cmd/aurelius generate-gpt2 -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -prompt "hello world" -max-tokens 1
+go run ./cmd/aurelius emit-gpt2-observation -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -prompt "hello world" -top-k 5
+go run ./cmd/aurelius inspect-gpt2-next -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -prompt "hello world" -top-k 5
+go run ./cmd/aurelius validate-gpt2 -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -fixture /path/to/reference.json
 go run ./cmd/aurelius serve
+go run ./cmd/aurelius serve -backend gpt2
 go run ./cmd/aurelius serve -addr localhost:8080
 go run ./cmd/aurelius tokenize -vocab /path/to/vocab.json -merges /path/to/merges.txt -text "hello world"
 go run ./cmd/aurelius inspect-model -model-config /path/to/config.json -vocab /path/to/vocab.json -merges /path/to/merges.txt
@@ -81,6 +85,8 @@ go run ./cmd/aurelius serve
 
 Then open `http://localhost:8080`.
 
+`serve` now supports `-backend auto|toy|gpt2`. In `auto` mode, Aurelius uses the GPT-2 backend when a complete checkpoint exists under `artifacts/gpt2/`; otherwise it falls back to the toy model.
+
 The web UI provides:
 
 - a polished chat-style interface
@@ -89,6 +95,8 @@ The web UI provides:
 - cache usage toggle
 - browser-side history persisted in `localStorage`
 - basic markdown rendering for assistant responses
+
+When `serve` is using the GPT-2 backend, the web path now applies conservative request limits for responsiveness: short replies by default, capped generation length, trimmed conversation history, and cache disabled because the current GPT-2 path is still non-cached.
 
 ## Development Commands
 
@@ -108,4 +116,4 @@ Cache-aware generation is optional per model. `runtime.Engine` detects models th
 
 The local web UI uses the same runtime engine and generation options as the CLI. Chat history is stored in the browser for now rather than persisted server-side.
 
-The `generate-gpt2` path now runs a real non-cached GPT-2 style forward pass from loaded safetensors weights, but the default CLI and web UI still use the toy transformer until the GPT-2 path has broader validation and feature parity.
+The `generate-gpt2` path now runs a real non-cached GPT-2 style forward pass from loaded safetensors weights, while `inspect-gpt2-next` and `validate-gpt2` support parity validation. The default CLI and web UI still use the toy transformer until the GPT-2 path has broader real-checkpoint validation and feature parity.

@@ -50,14 +50,14 @@
 
             <label class="field">
               <span>Max Tokens</span>
-              <input id="max-tokens" name="maxTokens" type="number" min="0" max="256" value="32">
+              <input id="max-tokens" name="maxTokens" type="number" min="0" max="32" value="2">
             </label>
 
             <label class="toggle">
-              <input id="use-cache" name="useCache" type="checkbox" checked>
+              <input id="use-cache" name="useCache" type="checkbox">
               <span class="toggle-copy">
                 <strong>Use KV Cache</strong>
-                <small>Incremental decoding when the model supports it.</small>
+                <small>Ignored when the active backend does not support cached decoding.</small>
               </span>
             </label>
 

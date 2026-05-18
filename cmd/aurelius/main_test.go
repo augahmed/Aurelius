@@ -7,10 +7,13 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/augahmed/aurelius/internal/gpt2"
+	"github.com/augahmed/aurelius/internal/runtime"
+	"github.com/augahmed/aurelius/internal/server"
 )
 
 func TestRunTokenize(t *testing.T) {
@@ -82,6 +85,166 @@ func TestRunGenerateGPT2(t *testing.T) {
 	}
 }
 
+func TestRunEmitGPT2Observation(t *testing.T) {
+	assets := writeGPT2ModelAssets(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"emit-gpt2-observation",
+		"-model-config", assets.configPath,
+		"-weights", assets.weightsPath,
+		"-vocab", assets.vocabPath,
+		"-merges", assets.mergesPath,
+		"-prompt", "hello!",
+		"-top-k", "3",
+		"-name", "fixture-name",
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	var fixture gpt2.ParityFixture
+	if err := json.Unmarshal(stdout.Bytes(), &fixture); err != nil {
+		t.Fatalf("json.Unmarshal error: %v", err)
+	}
+	if fixture.Name != "fixture-name" {
+		t.Fatalf("fixture.Name = %q, want %q", fixture.Name, "fixture-name")
+	}
+	if fixture.Prompt != "hello!" {
+		t.Fatalf("fixture.Prompt = %q, want %q", fixture.Prompt, "hello!")
+	}
+	if len(fixture.ExpectedTopTokens) != 3 {
+		t.Fatalf("len(fixture.ExpectedTopTokens) = %d, want %d", len(fixture.ExpectedTopTokens), 3)
+	}
+}
+
+func TestRunInspectGPT2Next(t *testing.T) {
+	assets := writeGPT2ModelAssets(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"inspect-gpt2-next",
+		"-model-config", assets.configPath,
+		"-weights", assets.weightsPath,
+		"-vocab", assets.vocabPath,
+		"-merges", assets.mergesPath,
+		"-prompt", "hello!",
+		"-top-k", "3",
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "prompt_tokens: [7 8]") {
+		t.Fatalf("stdout = %q, want prompt tokens", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "1: token=") {
+		t.Fatalf("stdout = %q, want ranked token output", stdout.String())
+	}
+}
+
+func TestRunValidateGPT2(t *testing.T) {
+	assets := writeGPT2ModelAssets(t)
+	fixturePath := filepath.Join(filepath.Dir(assets.configPath), "fixture.json")
+	if err := os.WriteFile(fixturePath, []byte(`{
+  "name": "tiny-gpt2-hello",
+  "prompt": "hello!",
+  "expected_input_tokens": [7, 8],
+  "expected_top_tokens": [
+    {"token": 8, "logit": 0.81598435},
+    {"token": 5, "logit": 0.73998573},
+    {"token": 3, "logit": 0.27599468}
+  ],
+  "logit_tolerance": 0.00001
+}`), 0o644); err != nil {
+		t.Fatalf("WriteFile fixture error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"validate-gpt2",
+		"-model-config", assets.configPath,
+		"-weights", assets.weightsPath,
+		"-vocab", assets.vocabPath,
+		"-merges", assets.mergesPath,
+		"-fixture", fixturePath,
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `validated fixture "tiny-gpt2-hello"`) {
+		t.Fatalf("stdout = %q, want validation success", stdout.String())
+	}
+}
+
+func TestResolveServeBackendAutoUsesGPT2WhenAssetsExist(t *testing.T) {
+	baseDir := t.TempDir()
+	writeGPT2ModelAssetsAt(t, filepath.Join(baseDir, "artifacts", "gpt2"))
+
+	got, err := resolveServeBackend("auto", baseDir, gpt2AssetPaths{})
+	if err != nil {
+		t.Fatalf("resolveServeBackend error: %v", err)
+	}
+	if got != "gpt2" {
+		t.Fatalf("resolveServeBackend() = %q, want %q", got, "gpt2")
+	}
+}
+
+func TestResolveServeBackendAutoFallsBackToToy(t *testing.T) {
+	got, err := resolveServeBackend("auto", t.TempDir(), gpt2AssetPaths{})
+	if err != nil {
+		t.Fatalf("resolveServeBackend error: %v", err)
+	}
+	if got != "toy" {
+		t.Fatalf("resolveServeBackend() = %q, want %q", got, "toy")
+	}
+}
+
+func TestBuildServeGeneratorUsesStopTokenDefaults(t *testing.T) {
+	fake := &recordingGenerator{}
+	wrapped := generatorWithDefaults{
+		underlying: fake,
+		stopTokens: []int{50256},
+	}
+
+	_, err := wrapped.GenerateWithOptions("prompt", runtime.GenerateOptions{
+		MaxTokens:  1,
+		StopTokens: []int{7},
+	})
+	if err != nil {
+		t.Fatalf("GenerateWithOptions error: %v", err)
+	}
+	if !reflect.DeepEqual(fake.options.StopTokens, []int{7, 50256}) {
+		t.Fatalf("stop tokens = %v, want %v", fake.options.StopTokens, []int{7, 50256})
+	}
+}
+
+func TestServeGeneratePolicyForGPT2(t *testing.T) {
+	got := serveGeneratePolicy("gpt2")
+	want := server.GeneratePolicy{
+		DefaultMaxTokens: 2,
+		MaxTokensCap:     2,
+		MaxMessages:      6,
+		MaxMessageRunes:  240,
+		MaxPromptRunes:   480,
+		DisableCache:     true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("serveGeneratePolicy() = %+v, want %+v", got, want)
+	}
+}
+
+func TestServeGeneratePolicyForToy(t *testing.T) {
+	got := serveGeneratePolicy("toy")
+	if !reflect.DeepEqual(got, server.GeneratePolicy{}) {
+		t.Fatalf("serveGeneratePolicy() = %+v, want zero policy", got)
+	}
+}
+
 type gpt2TestAssets struct {
 	vocabPath   string
 	mergesPath  string
@@ -122,6 +285,33 @@ func writeGPT2ModelAssets(t *testing.T) gpt2TestAssets {
 	}
 	if err := os.WriteFile(assets.configPath, []byte(`{"model_type":"gpt2","vocab_size":11,"n_ctx":8,"n_embd":2,"n_layer":1,"n_head":1,"n_inner":3}`), 0o644); err != nil {
 		t.Fatalf("WriteFile config error: %v", err)
+	}
+	return assets
+}
+
+func writeGPT2ModelAssetsAt(t *testing.T, dir string) gpt2TestAssets {
+	t.Helper()
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll error: %v", err)
+	}
+	assets := gpt2TestAssets{
+		vocabPath:   filepath.Join(dir, "vocab.json"),
+		mergesPath:  filepath.Join(dir, "merges.txt"),
+		configPath:  filepath.Join(dir, "config.json"),
+		weightsPath: filepath.Join(dir, "model.safetensors"),
+	}
+	if err := os.WriteFile(assets.vocabPath, []byte(`{"h":0,"e":1,"l":2,"o":3,"he":4,"hel":5,"hell":6,"hello":7,"!":8,"Ã":9,"©":10}`), 0o644); err != nil {
+		t.Fatalf("WriteFile vocab error: %v", err)
+	}
+	if err := os.WriteFile(assets.mergesPath, []byte("#version: 0.2\nh e\nhe l\nhel l\nhell o\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile merges error: %v", err)
+	}
+	if err := os.WriteFile(assets.configPath, []byte(`{"model_type":"gpt2","vocab_size":11,"n_ctx":8,"n_embd":2,"n_layer":1,"n_head":1,"n_inner":3,"eos_token_id":10}`), 0o644); err != nil {
+		t.Fatalf("WriteFile config error: %v", err)
+	}
+	if err := writeSafeTensors(assets.weightsPath, tinyStateDict()); err != nil {
+		t.Fatalf("writeSafeTensors error: %v", err)
 	}
 	return assets
 }
@@ -224,4 +414,13 @@ func writeSafeTensors(path string, tensors map[string]gpt2.Tensor) error {
 	copy(file[8:], headerBytes)
 	copy(file[8+len(headerBytes):], payload)
 	return os.WriteFile(path, file, 0o644)
+}
+
+type recordingGenerator struct {
+	options runtime.GenerateOptions
+}
+
+func (g *recordingGenerator) GenerateWithOptions(_ string, options runtime.GenerateOptions) (string, error) {
+	g.options = options
+	return "ok", nil
 }

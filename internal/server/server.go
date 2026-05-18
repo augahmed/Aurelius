@@ -23,6 +23,7 @@ type Server struct {
 	engine   Generator
 	mux      *http.ServeMux
 	assetsFS fs.FS
+	policy   GeneratePolicy
 }
 
 type ChatMessage struct {
@@ -41,7 +42,24 @@ type GenerateResponse struct {
 	Output string `json:"output"`
 }
 
-func New(engine Generator) *Server {
+type GeneratePolicy struct {
+	DefaultMaxTokens int
+	MaxTokensCap     int
+	MaxMessages      int
+	MaxMessageRunes  int
+	MaxPromptRunes   int
+	DisableCache     bool
+}
+
+type Option func(*Server)
+
+func WithGeneratePolicy(policy GeneratePolicy) Option {
+	return func(s *Server) {
+		s.policy = policy
+	}
+}
+
+func New(engine Generator, options ...Option) *Server {
 	assets, err := fs.Sub(uiFiles, "ui")
 	if err != nil {
 		panic(err)
@@ -50,6 +68,11 @@ func New(engine Generator) *Server {
 		engine:   engine,
 		mux:      http.NewServeMux(),
 		assetsFS: assets,
+	}
+	for _, option := range options {
+		if option != nil {
+			option(s)
+		}
 	}
 	s.routes()
 	return s
@@ -94,14 +117,16 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req = applyGeneratePolicy(req, s.policy)
 	prompt, err := buildPrompt(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	options := s.resolveGenerateOptions(req)
 	output, err := s.engine.GenerateWithOptions(prompt, runtime.GenerateOptions{
-		MaxTokens: req.MaxTokens,
-		UseCache:  req.UseCache,
+		MaxTokens: options.MaxTokens,
+		UseCache:  options.UseCache,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -136,8 +161,8 @@ func buildPrompt(req GenerateRequest) (string, error) {
 	if builder.Len() == 0 {
 		return "", fmt.Errorf("prompt cannot be empty")
 	}
-	builder.WriteString("Assistant:")
-	return builder.String(), nil
+	prompt := builder.String() + "Assistant:"
+	return prompt, nil
 }
 
 func normalizeRole(role string) string {
@@ -160,4 +185,59 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func (s *Server) resolveGenerateOptions(req GenerateRequest) runtime.GenerateOptions {
+	maxTokens := req.MaxTokens
+	if s.policy.DefaultMaxTokens > 0 && maxTokens <= 0 {
+		maxTokens = s.policy.DefaultMaxTokens
+	}
+	if s.policy.MaxTokensCap > 0 && maxTokens > s.policy.MaxTokensCap {
+		maxTokens = s.policy.MaxTokensCap
+	}
+
+	useCache := req.UseCache
+	if s.policy.DisableCache {
+		useCache = false
+	}
+
+	return runtime.GenerateOptions{
+		MaxTokens: maxTokens,
+		UseCache:  useCache,
+	}
+}
+
+func applyGeneratePolicy(req GenerateRequest, policy GeneratePolicy) GenerateRequest {
+	if len(req.Messages) == 0 {
+		req.Prompt = trimTrailingRunes(req.Prompt, policy.MaxPromptRunes)
+		return req
+	}
+
+	if policy.MaxMessages > 0 && len(req.Messages) > policy.MaxMessages {
+		req.Messages = append([]ChatMessage(nil), req.Messages[len(req.Messages)-policy.MaxMessages:]...)
+	}
+	if policy.MaxMessageRunes <= 0 {
+		return req
+	}
+
+	trimmed := make([]ChatMessage, len(req.Messages))
+	for i, message := range req.Messages {
+		trimmed[i] = ChatMessage{
+			Role:    message.Role,
+			Content: trimTrailingRunes(message.Content, policy.MaxMessageRunes),
+		}
+	}
+	req.Messages = trimmed
+	return req
+}
+
+func trimTrailingRunes(value string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[len(runes)-maxRunes:])
 }

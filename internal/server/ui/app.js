@@ -26,7 +26,7 @@ chatForm.addEventListener("submit", async (event) => {
   }
 
   const prompt = promptInput.value.trim();
-  const maxTokens = Number(maxTokensInput.value);
+  const maxTokens = normalizeMaxTokens();
   const useCache = useCacheInput.checked;
 
   if (!prompt) {
@@ -128,7 +128,7 @@ function persistMessages() {
 
 function persistSettings() {
   const settings = {
-    maxTokens: maxTokensInput.value,
+    maxTokens: String(normalizeMaxTokens()),
     useCache: useCacheInput.checked,
   };
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -150,6 +150,7 @@ function applySettings() {
   } catch {
     // Ignore invalid saved settings.
   }
+  normalizeMaxTokens();
 }
 
 function renderMessages() {
@@ -248,4 +249,18 @@ function setStatus(message, isError) {
 
 function scrollToBottom() {
   chatHistory.scrollTop = chatHistory.scrollHeight;
+}
+
+function normalizeMaxTokens() {
+  const fallback = Number(maxTokensInput.defaultValue || "2");
+  const min = Number(maxTokensInput.min || "0");
+  const max = Number(maxTokensInput.max || "32");
+  let value = Number(maxTokensInput.value);
+
+  if (!Number.isFinite(value)) {
+    value = fallback;
+  }
+  value = Math.max(min, Math.min(max, Math.trunc(value)));
+  maxTokensInput.value = String(value);
+  return value;
 }
