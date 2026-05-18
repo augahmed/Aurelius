@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/augahmed/aurelius/internal/runtime"
+	"github.com/augahmed/aurelius/internal/textutil"
 )
 
 //go:embed ui/*
@@ -108,7 +109,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, GenerateResponse{
-		Output: extractCompletion(prompt, output),
+		Output: textutil.SanitizeVisibleOrFallback(extractCompletion(prompt, output)),
 	})
 }
 

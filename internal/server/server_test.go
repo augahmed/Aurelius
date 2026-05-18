@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/augahmed/aurelius/internal/runtime"
+	"github.com/augahmed/aurelius/internal/textutil"
 )
 
 func TestServerHealth(t *testing.T) {
@@ -82,6 +83,48 @@ func TestServerGenerateWithMessagesBuildsConversationPrompt(t *testing.T) {
 	wantPrompt := "User: hello\n\nAssistant: hi\n\nUser: how are you?\n\nAssistant:"
 	if engine.prompt != wantPrompt {
 		t.Fatalf("prompt = %q, want %q", engine.prompt, wantPrompt)
+	}
+}
+
+func TestServerGenerateSanitizesNonDisplayableCompletion(t *testing.T) {
+	engine := &fakeGenerator{outputSuffix: "reply\x02\x00"}
+	srv := New(engine)
+
+	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"hello","max_tokens":3}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var res GenerateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("json.Unmarshal error: %v", err)
+	}
+	if res.Output != "reply" {
+		t.Fatalf("output = %q, want %q", res.Output, "reply")
+	}
+}
+
+func TestServerGenerateUsesPrototypeFallbackWhenCompletionIsNotReadable(t *testing.T) {
+	engine := &fakeGenerator{outputSuffix: "\x02\x03\x00"}
+	srv := New(engine)
+
+	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"hello","max_tokens":3}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %q", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var res GenerateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("json.Unmarshal error: %v", err)
+	}
+	if res.Output != textutil.PrototypeFallback {
+		t.Fatalf("output = %q, want %q", res.Output, textutil.PrototypeFallback)
 	}
 }
 

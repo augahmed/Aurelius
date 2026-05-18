@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/augahmed/aurelius/internal/gpt2"
 	"github.com/augahmed/aurelius/internal/runtime"
 	"github.com/augahmed/aurelius/internal/sampler"
 	"github.com/augahmed/aurelius/internal/server"
@@ -26,6 +27,10 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 			return runGenerate(args[1:], stdout, stderr)
 		case "serve":
 			return runServe(args[1:], stderr)
+		case "tokenize":
+			return runTokenize(args[1:], stdout, stderr)
+		case "inspect-model":
+			return runInspectModel(args[1:], stdout, stderr)
 		}
 	}
 	return runGenerate(args, stdout, stderr)
@@ -88,6 +93,103 @@ func runServe(args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "serve: %v\n", err)
 		return 1
 	}
+	return 0
+}
+
+func runTokenize(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("tokenize", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	vocabPath := flags.String("vocab", "", "path to GPT-2 vocab.json")
+	mergesPath := flags.String("merges", "", "path to GPT-2 merges.txt")
+	text := flags.String("text", "", "text to tokenize")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+
+	if *vocabPath == "" || *mergesPath == "" {
+		fmt.Fprintln(stderr, "vocab and merges are required")
+		flags.Usage()
+		return 1
+	}
+	if *text == "" {
+		fmt.Fprintln(stderr, "text is required")
+		flags.Usage()
+		return 1
+	}
+
+	tok, err := tokenizer.LoadBPETokenizer(*vocabPath, *mergesPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load tokenizer: %v\n", err)
+		return 1
+	}
+
+	tokens, err := tok.Encode(*text)
+	if err != nil {
+		fmt.Fprintf(stderr, "encode: %v\n", err)
+		return 1
+	}
+	decoded, err := tok.Decode(tokens)
+	if err != nil {
+		fmt.Fprintf(stderr, "decode: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "tokens: %v\n", tokens)
+	fmt.Fprintf(stdout, "decoded: %s\n", decoded)
+	return 0
+}
+
+func runInspectModel(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("inspect-model", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	configPath := flags.String("model-config", "", "path to GPT-2 config.json")
+	vocabPath := flags.String("vocab", "", "optional path to GPT-2 vocab.json")
+	mergesPath := flags.String("merges", "", "optional path to GPT-2 merges.txt")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+
+	if *configPath == "" {
+		fmt.Fprintln(stderr, "model-config is required")
+		flags.Usage()
+		return 1
+	}
+
+	cfg, err := gpt2.LoadConfig(*configPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load model config: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "model_type: %s\n", cfg.ModelType)
+	fmt.Fprintf(stdout, "vocab_size: %d\n", cfg.VocabSize)
+	fmt.Fprintf(stdout, "context_length: %d\n", cfg.ResolvedContextLength())
+	fmt.Fprintf(stdout, "embedding_dim: %d\n", cfg.EmbeddingDim)
+	fmt.Fprintf(stdout, "num_layers: %d\n", cfg.NumLayers)
+	fmt.Fprintf(stdout, "num_heads: %d\n", cfg.NumHeads)
+	fmt.Fprintf(stdout, "feed_forward_dim: %d\n", cfg.ResolvedFeedForwardDim())
+	fmt.Fprintf(stdout, "bos_token_id: %d\n", cfg.BOSTokenID)
+	fmt.Fprintf(stdout, "eos_token_id: %d\n", cfg.EOSTokenID)
+
+	if *vocabPath != "" || *mergesPath != "" {
+		if *vocabPath == "" || *mergesPath == "" {
+			fmt.Fprintln(stderr, "vocab and merges must be provided together")
+			return 1
+		}
+
+		tok, err := tokenizer.LoadBPETokenizer(*vocabPath, *mergesPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "load tokenizer: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "tokenizer_vocab_size: %d\n", tok.VocabSize())
+		fmt.Fprintf(stdout, "tokenizer_matches_model_vocab: %t\n", tok.VocabSize() == cfg.VocabSize)
+	}
+
 	return 0
 }
 
