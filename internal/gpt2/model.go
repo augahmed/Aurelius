@@ -67,11 +67,11 @@ func NewModel(cfg Config, state map[string]Tensor) (*Model, error) {
 		blocks: make([]Block, cfg.NumLayers),
 	}
 
-	tokenEmbeddings, err := requireTensor(state, "transformer.wte.weight", cfg.VocabSize, cfg.EmbeddingDim)
+	tokenEmbeddings, err := requireTensorAlias(state, []string{"transformer.wte.weight", "wte.weight"}, cfg.VocabSize, cfg.EmbeddingDim)
 	if err != nil {
 		return nil, err
 	}
-	positionEmbeddings, err := requireTensor(state, "transformer.wpe.weight", cfg.ResolvedContextLength(), cfg.EmbeddingDim)
+	positionEmbeddings, err := requireTensorAlias(state, []string{"transformer.wpe.weight", "wpe.weight"}, cfg.ResolvedContextLength(), cfg.EmbeddingDim)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func NewModel(cfg Config, state map[string]Tensor) (*Model, error) {
 		model.lmHead = tokenEmbeddings
 	}
 
-	finalNorm, err := requireLayerNorm(state, "transformer.ln_f", cfg.EmbeddingDim)
+	finalNorm, err := requireLayerNormAlias(state, []string{"transformer.ln_f", "ln_f"}, cfg.EmbeddingDim)
 	if err != nil {
 		return nil, err
 	}
@@ -97,45 +97,46 @@ func NewModel(cfg Config, state map[string]Tensor) (*Model, error) {
 	feedForwardDim := cfg.ResolvedFeedForwardDim()
 	for i := 0; i < cfg.NumLayers; i++ {
 		prefix := fmt.Sprintf("transformer.h.%d", i)
+		hfPrefix := fmt.Sprintf("h.%d", i)
 
-		attentionNorm, err := requireLayerNorm(state, prefix+".ln_1", cfg.EmbeddingDim)
+		attentionNorm, err := requireLayerNormAlias(state, []string{prefix + ".ln_1", hfPrefix + ".ln_1"}, cfg.EmbeddingDim)
 		if err != nil {
 			return nil, err
 		}
-		attentionCombinedWeight, err := requireTensor(state, prefix+".attn.c_attn.weight", cfg.EmbeddingDim, cfg.EmbeddingDim*3)
+		attentionCombinedWeight, err := requireTensorAlias(state, []string{prefix + ".attn.c_attn.weight", hfPrefix + ".attn.c_attn.weight"}, cfg.EmbeddingDim, cfg.EmbeddingDim*3)
 		if err != nil {
 			return nil, err
 		}
-		attentionCombinedBias, err := requireVector(state, prefix+".attn.c_attn.bias", cfg.EmbeddingDim*3)
+		attentionCombinedBias, err := requireVectorAlias(state, []string{prefix + ".attn.c_attn.bias", hfPrefix + ".attn.c_attn.bias"}, cfg.EmbeddingDim*3)
 		if err != nil {
 			return nil, err
 		}
-		attentionProjectWeight, err := requireTensor(state, prefix+".attn.c_proj.weight", cfg.EmbeddingDim, cfg.EmbeddingDim)
+		attentionProjectWeight, err := requireTensorAlias(state, []string{prefix + ".attn.c_proj.weight", hfPrefix + ".attn.c_proj.weight"}, cfg.EmbeddingDim, cfg.EmbeddingDim)
 		if err != nil {
 			return nil, err
 		}
-		attentionProjectBias, err := requireVector(state, prefix+".attn.c_proj.bias", cfg.EmbeddingDim)
+		attentionProjectBias, err := requireVectorAlias(state, []string{prefix + ".attn.c_proj.bias", hfPrefix + ".attn.c_proj.bias"}, cfg.EmbeddingDim)
 		if err != nil {
 			return nil, err
 		}
 
-		mlpNorm, err := requireLayerNorm(state, prefix+".ln_2", cfg.EmbeddingDim)
+		mlpNorm, err := requireLayerNormAlias(state, []string{prefix + ".ln_2", hfPrefix + ".ln_2"}, cfg.EmbeddingDim)
 		if err != nil {
 			return nil, err
 		}
-		mlpUpWeight, err := requireTensor(state, prefix+".mlp.c_fc.weight", cfg.EmbeddingDim, feedForwardDim)
+		mlpUpWeight, err := requireTensorAlias(state, []string{prefix + ".mlp.c_fc.weight", hfPrefix + ".mlp.c_fc.weight"}, cfg.EmbeddingDim, feedForwardDim)
 		if err != nil {
 			return nil, err
 		}
-		mlpUpBias, err := requireVector(state, prefix+".mlp.c_fc.bias", feedForwardDim)
+		mlpUpBias, err := requireVectorAlias(state, []string{prefix + ".mlp.c_fc.bias", hfPrefix + ".mlp.c_fc.bias"}, feedForwardDim)
 		if err != nil {
 			return nil, err
 		}
-		mlpDownWeight, err := requireTensor(state, prefix+".mlp.c_proj.weight", feedForwardDim, cfg.EmbeddingDim)
+		mlpDownWeight, err := requireTensorAlias(state, []string{prefix + ".mlp.c_proj.weight", hfPrefix + ".mlp.c_proj.weight"}, feedForwardDim, cfg.EmbeddingDim)
 		if err != nil {
 			return nil, err
 		}
-		mlpDownBias, err := requireVector(state, prefix+".mlp.c_proj.bias", cfg.EmbeddingDim)
+		mlpDownBias, err := requireVectorAlias(state, []string{prefix + ".mlp.c_proj.bias", hfPrefix + ".mlp.c_proj.bias"}, cfg.EmbeddingDim)
 		if err != nil {
 			return nil, err
 		}
@@ -337,11 +338,21 @@ func gelu(value float64) float64 {
 }
 
 func requireLayerNorm(state map[string]Tensor, prefix string, width int) (LayerNorm, error) {
-	weight, err := requireVector(state, prefix+".weight", width)
+	return requireLayerNormAlias(state, []string{prefix}, width)
+}
+
+func requireLayerNormAlias(state map[string]Tensor, prefixes []string, width int) (LayerNorm, error) {
+	weightNames := make([]string, 0, len(prefixes))
+	biasNames := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		weightNames = append(weightNames, prefix+".weight")
+		biasNames = append(biasNames, prefix+".bias")
+	}
+	weight, err := requireVectorAlias(state, weightNames, width)
 	if err != nil {
 		return LayerNorm{}, err
 	}
-	bias, err := requireVector(state, prefix+".bias", width)
+	bias, err := requireVectorAlias(state, biasNames, width)
 	if err != nil {
 		return LayerNorm{}, err
 	}
@@ -349,17 +360,36 @@ func requireLayerNorm(state map[string]Tensor, prefix string, width int) (LayerN
 }
 
 func requireTensor(state map[string]Tensor, name string, shape ...int) (Tensor, error) {
-	value, ok := state[name]
-	if !ok {
-		return Tensor{}, fmt.Errorf("missing tensor %q", name)
+	return requireTensorAlias(state, []string{name}, shape...)
+}
+
+func requireTensorAlias(state map[string]Tensor, names []string, shape ...int) (Tensor, error) {
+	for _, name := range names {
+		value, ok := state[name]
+		if !ok {
+			continue
+		}
+		if err := expectShape(name, value, shape...); err != nil {
+			return Tensor{}, err
+		}
+		return value, nil
 	}
-	if err := expectShape(name, value, shape...); err != nil {
-		return Tensor{}, err
+	return Tensor{}, fmt.Errorf("missing tensor %q", names[0])
+}
+
+func requireVectorAlias(state map[string]Tensor, names []string, length int) ([]float64, error) {
+	value, err := requireTensorAlias(state, names, length)
+	if err != nil {
+		return nil, err
 	}
-	return value, nil
+	return append([]float64(nil), value.Data...), nil
 }
 
 func requireVector(state map[string]Tensor, name string, length int) ([]float64, error) {
+	value, ok := state[name]
+	if !ok {
+		return nil, fmt.Errorf("missing tensor %q", name)
+	}
 	value, err := requireTensor(state, name, length)
 	if err != nil {
 		return nil, err

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/augahmed/aurelius/internal/tokenizer"
 )
 
 func TestLoadSafeTensors(t *testing.T) {
@@ -157,6 +159,31 @@ func tensor1D(data []float64) Tensor {
 
 func tensor2D(rows, cols int, data []float64) Tensor {
 	return Tensor{Shape: []int{rows, cols}, Data: append([]float64(nil), data...)}
+}
+
+func testVocab() map[string]int {
+	return map[string]int{
+		"h":     0,
+		"e":     1,
+		"l":     2,
+		"o":     3,
+		"he":    4,
+		"hel":   5,
+		"hell":  6,
+		"hello": 7,
+		"!":     8,
+		"Ã":     9,
+		"©":     10,
+	}
+}
+
+func testMerges() []tokenizer.MergeRule {
+	return []tokenizer.MergeRule{
+		{Left: "h", Right: "e"},
+		{Left: "he", Right: "l"},
+		{Left: "hel", Right: "l"},
+		{Left: "hell", Right: "o"},
+	}
 }
 
 func writeSafeTensors(path string, tensors map[string]Tensor) error {

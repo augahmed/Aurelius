@@ -1,0 +1,15 @@
+{
+  "name": "tiny-gpt2-hello",
+  "prompt": "hello!",
+  "expected_input_tokens": [7, 8],
+  "expected_top_tokens": [
+    {"token": 8, "logit": 0.81598435},
+    {"token": 5, "logit": 0.73998573},
+    {"token": 3, "logit": 0.27599468}
+  ],
+  "logit_tolerance": 0.00001,
+  "metadata": {
+    "kind": "checked_in_harness_fixture",
+    "note": "Replace with a real external GPT-2 checkpoint fixture once exported reference outputs are available."
+  }
+}
