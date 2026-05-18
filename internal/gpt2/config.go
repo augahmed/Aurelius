@@ -83,6 +83,13 @@ func (c Config) ResolvedFeedForwardDim() int {
 	return c.EmbeddingDim * 4
 }
 
+func (c Config) ResolvedLayerNormEpsilon() float64 {
+	if c.LayerNormEpsilon > 0 {
+		return c.LayerNormEpsilon
+	}
+	return 1e-5
+}
+
 func (c Config) ModelConfig() model.Config {
 	return model.Config{
 		VocabSize:     c.VocabSize,

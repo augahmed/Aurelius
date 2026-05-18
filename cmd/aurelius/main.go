@@ -25,6 +25,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		switch args[0] {
 		case "generate":
 			return runGenerate(args[1:], stdout, stderr)
+		case "generate-gpt2":
+			return runGenerateGPT2(args[1:], stdout, stderr)
 		case "serve":
 			return runServe(args[1:], stderr)
 		case "tokenize":
@@ -65,6 +67,47 @@ func runGenerate(args []string, stdout io.Writer, stderr io.Writer) int {
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "generate: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, output)
+	return 0
+}
+
+func runGenerateGPT2(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("generate-gpt2", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	configPath := flags.String("model-config", "", "path to GPT-2 config.json")
+	weightsPath := flags.String("weights", "", "path to GPT-2 model.safetensors")
+	vocabPath := flags.String("vocab", "", "path to GPT-2 vocab.json")
+	mergesPath := flags.String("merges", "", "path to GPT-2 merges.txt")
+	prompt := flags.String("prompt", "", "prompt text to generate from")
+	maxTokens := flags.Int("max-tokens", 1, "number of tokens to generate")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+
+	if *configPath == "" || *weightsPath == "" || *vocabPath == "" || *mergesPath == "" {
+		fmt.Fprintln(stderr, "model-config, weights, vocab, and merges are required")
+		flags.Usage()
+		return 1
+	}
+	if *prompt == "" {
+		fmt.Fprintln(stderr, "prompt is required")
+		flags.Usage()
+		return 1
+	}
+
+	engine, err := buildGPT2Engine(*configPath, *weightsPath, *vocabPath, *mergesPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "create GPT-2 engine: %v\n", err)
+		return 1
+	}
+
+	output, err := engine.Generate(*prompt, *maxTokens)
+	if err != nil {
+		fmt.Fprintf(stderr, "generate-gpt2: %v\n", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, output)
@@ -196,6 +239,18 @@ func runInspectModel(args []string, stdout io.Writer, stderr io.Writer) int {
 func buildEngine() (*runtime.Engine, error) {
 	tok := tokenizer.NewByteTokenizer()
 	model, err := transformer.NewTinyTransformer(transformer.DefaultTinyConfig(tok.VocabSize()))
+	if err != nil {
+		return nil, err
+	}
+	return runtime.NewEngine(tok, model, sampler.NewGreedySampler())
+}
+
+func buildGPT2Engine(configPath, weightsPath, vocabPath, mergesPath string) (*runtime.Engine, error) {
+	tok, err := tokenizer.LoadBPETokenizer(vocabPath, mergesPath)
+	if err != nil {
+		return nil, err
+	}
+	model, err := gpt2.LoadModel(configPath, weightsPath)
 	if err != nil {
 		return nil, err
 	}

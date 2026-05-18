@@ -54,7 +54,7 @@ Current implementation boundaries:
 - `internal/transformer` implements a tiny model with deterministic embeddings, explicit decoder blocks, and an output projection.
 - `internal/runtime` owns the autoregressive loop and chooses between uncached full-sequence decoding and optional cache-backed incremental decoding.
 - `internal/tokenizer` now contains both the prototype byte tokenizer and a GPT-2 style BPE tokenizer that loads `vocab.json` and `merges.txt`.
-- `internal/gpt2` loads GPT-2 config metadata from `config.json` so real model dimensions can enter the system before weight tensors do.
+- `internal/gpt2` now loads GPT-2 config metadata from `config.json`, GPT-2 weights from local `safetensors` files, and runs a correctness-first non-cached GPT-2 forward pass.
 - `internal/tensor` exposes the minimal operations needed for the tiny model and future incremental expansion.
 - `internal/server` serves the local web app, the JSON generation API, and the health endpoint.
 

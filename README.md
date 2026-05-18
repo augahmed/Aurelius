@@ -64,6 +64,7 @@ aurelius/
 go run ./cmd/aurelius -prompt "hello world" -max-tokens 10
 go run ./cmd/aurelius -prompt "hello world" -max-tokens 10 -use-cache=true
 go run ./cmd/aurelius generate -prompt "hello world" -max-tokens 10 -use-cache=true
+go run ./cmd/aurelius generate-gpt2 -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -prompt "hello world" -max-tokens 1
 go run ./cmd/aurelius serve
 go run ./cmd/aurelius serve -addr localhost:8080
 go run ./cmd/aurelius tokenize -vocab /path/to/vocab.json -merges /path/to/merges.txt -text "hello world"
@@ -107,4 +108,4 @@ Cache-aware generation is optional per model. `runtime.Engine` detects models th
 
 The local web UI uses the same runtime engine and generation options as the CLI. Chat history is stored in the browser for now rather than persisted server-side.
 
-The GPT-2 tokenizer and config loaders are asset-loading steps only. They do not yet replace the toy transformer with pretrained inference.
+The `generate-gpt2` path now runs a real non-cached GPT-2 style forward pass from loaded safetensors weights, but the default CLI and web UI still use the toy transformer until the GPT-2 path has broader validation and feature parity.

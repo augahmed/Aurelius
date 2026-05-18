@@ -2,10 +2,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/augahmed/aurelius/internal/gpt2"
 )
 
 func TestRunTokenize(t *testing.T) {
@@ -54,10 +59,34 @@ func TestRunInspectModel(t *testing.T) {
 	}
 }
 
+func TestRunGenerateGPT2(t *testing.T) {
+	assets := writeGPT2ModelAssets(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"generate-gpt2",
+		"-model-config", assets.configPath,
+		"-weights", assets.weightsPath,
+		"-vocab", assets.vocabPath,
+		"-merges", assets.mergesPath,
+		"-prompt", "hello!",
+		"-max-tokens", "1",
+	}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.HasPrefix(stdout.String(), "hello!") {
+		t.Fatalf("stdout = %q, want GPT-2 generation output", stdout.String())
+	}
+}
+
 type gpt2TestAssets struct {
-	vocabPath  string
-	mergesPath string
-	configPath string
+	vocabPath   string
+	mergesPath  string
+	configPath  string
+	weightsPath string
 }
 
 func writeGPT2TestAssets(t *testing.T) gpt2TestAssets {
@@ -81,4 +110,118 @@ func writeGPT2TestAssets(t *testing.T) gpt2TestAssets {
 	}
 
 	return assets
+}
+
+func writeGPT2ModelAssets(t *testing.T) gpt2TestAssets {
+	t.Helper()
+
+	assets := writeGPT2TestAssets(t)
+	assets.weightsPath = filepath.Join(filepath.Dir(assets.configPath), "model.safetensors")
+	if err := writeSafeTensors(assets.weightsPath, tinyStateDict()); err != nil {
+		t.Fatalf("writeSafeTensors error: %v", err)
+	}
+	if err := os.WriteFile(assets.configPath, []byte(`{"model_type":"gpt2","vocab_size":11,"n_ctx":8,"n_embd":2,"n_layer":1,"n_head":1,"n_inner":3}`), 0o644); err != nil {
+		t.Fatalf("WriteFile config error: %v", err)
+	}
+	return assets
+}
+
+func tinyStateDict() map[string]gpt2.Tensor {
+	return map[string]gpt2.Tensor{
+		"transformer.wte.weight": tensor2D(11, 2, []float64{
+			0.10, 0.00,
+			0.00, 0.10,
+			0.20, -0.10,
+			-0.10, 0.20,
+			0.30, 0.40,
+			-0.30, 0.50,
+			0.40, -0.20,
+			0.60, 0.10,
+			-0.20, 0.70,
+			0.50, -0.40,
+			-0.50, -0.30,
+		}),
+		"transformer.wpe.weight": tensor2D(8, 2, []float64{
+			0.01, -0.02,
+			0.03, 0.04,
+			0.05, -0.01,
+			-0.04, 0.02,
+			0.02, 0.03,
+			-0.02, -0.03,
+			0.04, 0.01,
+			-0.01, 0.05,
+		}),
+		"transformer.h.0.ln_1.weight": tensor1D([]float64{1.10, 0.90}),
+		"transformer.h.0.ln_1.bias":   tensor1D([]float64{0.01, -0.02}),
+		"transformer.h.0.attn.c_attn.weight": tensor2D(2, 6, []float64{
+			0.20, -0.10, 0.05, 0.30, -0.20, 0.10,
+			0.10, 0.15, -0.05, -0.25, 0.20, 0.05,
+		}),
+		"transformer.h.0.attn.c_attn.bias": tensor1D([]float64{0.01, -0.02, 0.03, 0.02, -0.01, 0.04}),
+		"transformer.h.0.attn.c_proj.weight": tensor2D(2, 2, []float64{
+			0.20, -0.30,
+			0.40, 0.10,
+		}),
+		"transformer.h.0.attn.c_proj.bias": tensor1D([]float64{0.01, -0.02}),
+		"transformer.h.0.ln_2.weight":      tensor1D([]float64{0.95, 1.05}),
+		"transformer.h.0.ln_2.bias":        tensor1D([]float64{-0.03, 0.02}),
+		"transformer.h.0.mlp.c_fc.weight": tensor2D(2, 3, []float64{
+			0.30, -0.20, 0.10,
+			-0.10, 0.25, 0.20,
+		}),
+		"transformer.h.0.mlp.c_fc.bias": tensor1D([]float64{0.01, -0.02, 0.03}),
+		"transformer.h.0.mlp.c_proj.weight": tensor2D(3, 2, []float64{
+			0.20, -0.10,
+			0.05, 0.30,
+			-0.25, 0.15,
+		}),
+		"transformer.h.0.mlp.c_proj.bias": tensor1D([]float64{0.02, -0.01}),
+		"transformer.ln_f.weight":         tensor1D([]float64{1.00, 0.85}),
+		"transformer.ln_f.bias":           tensor1D([]float64{0.00, 0.03}),
+	}
+}
+
+func tensor1D(data []float64) gpt2.Tensor {
+	return gpt2.Tensor{Shape: []int{len(data)}, Data: append([]float64(nil), data...)}
+}
+
+func tensor2D(rows, cols int, data []float64) gpt2.Tensor {
+	return gpt2.Tensor{Shape: []int{rows, cols}, Data: append([]float64(nil), data...)}
+}
+
+func writeSafeTensors(path string, tensors map[string]gpt2.Tensor) error {
+	type headerEntry struct {
+		DType       string `json:"dtype"`
+		Shape       []int  `json:"shape"`
+		DataOffsets []int  `json:"data_offsets"`
+	}
+
+	header := make(map[string]headerEntry, len(tensors))
+	payload := make([]byte, 0)
+	offset := 0
+	for name, tensor := range tensors {
+		start := offset
+		for _, value := range tensor.Data {
+			var bytes [4]byte
+			binary.LittleEndian.PutUint32(bytes[:], math.Float32bits(float32(value)))
+			payload = append(payload, bytes[:]...)
+			offset += 4
+		}
+		header[name] = headerEntry{
+			DType:       "F32",
+			Shape:       append([]int(nil), tensor.Shape...),
+			DataOffsets: []int{start, offset},
+		}
+	}
+
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		return err
+	}
+
+	file := make([]byte, 8+len(headerBytes)+len(payload))
+	binary.LittleEndian.PutUint64(file[:8], uint64(len(headerBytes)))
+	copy(file[8:], headerBytes)
+	copy(file[8+len(headerBytes):], payload)
+	return os.WriteFile(path, file, 0o644)
 }
