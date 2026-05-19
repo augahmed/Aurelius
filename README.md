@@ -20,7 +20,9 @@ The current prototype is intentionally small:
 - `internal/tensor` provides basic CPU tensor math for correctness-first experimentation.
 - `internal/tokenizer` defines the tokenizer boundary and ships with both a simple byte tokenizer and a GPT-2 style BPE tokenizer loader.
 - `internal/model` defines shared model contracts and configuration.
+- `internal/arithmetic` generates synthetic arithmetic datasets and builds training sequences.
 - `internal/gpt2` loads GPT-2 model config metadata from local `config.json` files.
+- `internal/mathlm` contains a small trainable autoregressive MLP language model for student-scale arithmetic experiments.
 - `internal/transformer` contains a deterministic toy transformer-style model that exercises the runtime path.
 - `internal/sampler` provides greedy and temperature-based next-token selection.
 - `internal/runtime` coordinates tokenization, model forward passes, and autoregressive generation, including optional KV-cached decoding when a model supports it.
@@ -56,6 +58,7 @@ aurelius/
 - [x] Add a local chat-style web UI served by Go
 - [x] Add initial tests and architecture documentation
 - [ ] Add pretrained weight loading
+- [ ] Add student-scale training workflow from scratch
 - [ ] Add streaming and benchmarking workflows
 
 ## Example CLI Usage
@@ -68,6 +71,10 @@ go run ./cmd/aurelius generate-gpt2 -model-config /path/to/config.json -weights 
 go run ./cmd/aurelius emit-gpt2-observation -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -prompt "hello world" -top-k 5
 go run ./cmd/aurelius inspect-gpt2-next -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -prompt "hello world" -top-k 5
 go run ./cmd/aurelius validate-gpt2 -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -fixture /path/to/reference.json
+go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic
+go run ./cmd/aurelius train-math -data-dir ./data/arithmetic -checkpoint ./artifacts/mathlm.json
+go run ./cmd/aurelius eval-math -checkpoint ./artifacts/mathlm.json -data ./data/arithmetic/val.jsonl
+go run ./cmd/aurelius generate-math -checkpoint ./artifacts/mathlm.json -prompt "12 + 7 = "
 go run ./cmd/aurelius serve
 go run ./cmd/aurelius serve -backend gpt2
 go run ./cmd/aurelius serve -addr localhost:8080
@@ -99,6 +106,18 @@ The web UI provides:
 - basic markdown rendering for assistant responses
 
 When `serve` is using the GPT-2 backend, the web path now applies conservative request limits for responsiveness: a short assistant preamble, bounded temperature and top-k sampling, modest default reply length, capped generation length, trimmed conversation history, and cache-aware incremental decoding.
+
+## Arithmetic Training
+
+Aurelius now includes a student-scale from-scratch training path for arithmetic. It uses:
+
+- synthetic arithmetic JSONL datasets
+- the existing byte tokenizer for a minimal training-first path
+- a small fixed-context autoregressive MLP language model
+- JSON checkpoints for save/resume
+- exact-match evaluation on held-out arithmetic prompts
+
+This path is intentionally small and educational. It is not a frontier LLM training stack and it does not replace the existing GPT-2 inference path.
 
 ## Development Commands
 

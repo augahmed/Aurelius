@@ -51,11 +51,13 @@ The prototype is CPU-only and correctness-first. It uses a deterministic toy tra
 Current implementation boundaries:
 
 - `internal/model` owns model configuration and forward-pass contracts.
+- `internal/arithmetic` owns synthetic arithmetic dataset generation and sequence construction for training.
 - `internal/transformer` implements a tiny model with deterministic embeddings, explicit decoder blocks, and an output projection.
 - `internal/runtime` owns the autoregressive loop and chooses between uncached full-sequence decoding and optional cache-backed incremental decoding.
 - `internal/tokenizer` now contains both the prototype byte tokenizer and a GPT-2 style BPE tokenizer that loads `vocab.json` and `merges.txt`.
 - `internal/gpt2` now loads GPT-2 config metadata from `config.json`, GPT-2 weights from local `safetensors` files, and runs a correctness-first GPT-2 forward pass with optional KV-cached incremental decoding.
 - `internal/gpt2` also owns a parity-fixture harness so checkpoints can be validated against reference outputs before the GPT-2 path is promoted.
+- `internal/mathlm` owns a small trainable fixed-context autoregressive language model plus checkpointing and evaluation helpers for arithmetic-focused training.
 - `internal/tensor` exposes the minimal operations needed for the tiny model and future incremental expansion.
 - `internal/server` serves the local web app, the JSON generation API, and the health endpoint.
 
@@ -87,6 +89,18 @@ The first Aurelius webpage is served directly by Go from embedded static assets.
 - when the active backend is GPT-2, the server applies conservative web-specific limits so chat stays responsive on the current CPU path: a small assistant preamble, bounded temperature and top-k sampling, modest reply caps, recent-history trimming, per-message prompt trimming, and cache-aware incremental decoding when enabled
 
 This keeps state management lightweight while preserving a clean boundary between the UI, HTTP layer, and generation runtime.
+
+## Student-Scale Training Path
+
+The current training path is intentionally narrower than the GPT-2 inference stack:
+
+- dataset generation writes JSONL records with `prompt` and `completion`
+- tokenization reuses the byte tokenizer so the first end-to-end training loop stays simple
+- training examples are left-padded fixed-context windows for next-token prediction
+- the trainable model is a small autoregressive MLP language model rather than a backprop-through-transformer implementation
+- checkpoints serialize model weights and optimizer state as JSON for easy inspection and resume
+
+This is an educational bridge toward “train from scratch” rather than a claim of a production-grade LLM training system.
 
 ## Future Milestones
 

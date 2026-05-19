@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/augahmed/aurelius/internal/arithmetic"
 	"github.com/augahmed/aurelius/internal/gpt2"
+	"github.com/augahmed/aurelius/internal/mathlm"
 	"github.com/augahmed/aurelius/internal/runtime"
 	"github.com/augahmed/aurelius/internal/sampler"
 	"github.com/augahmed/aurelius/internal/server"
@@ -25,6 +28,14 @@ func main() {
 func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
+		case "gen-math-data":
+			return runGenerateMathData(args[1:], stdout, stderr)
+		case "train-math":
+			return runTrainMath(args[1:], stdout, stderr)
+		case "eval-math":
+			return runEvalMath(args[1:], stdout, stderr)
+		case "generate-math":
+			return runGenerateMath(args[1:], stdout, stderr)
 		case "generate":
 			return runGenerate(args[1:], stdout, stderr)
 		case "generate-gpt2":
@@ -79,6 +90,209 @@ func runGenerate(args []string, stdout io.Writer, stderr io.Writer) int {
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "generate: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, output)
+	return 0
+}
+
+func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("gen-math-data", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	outputDir := flags.String("output-dir", "", "directory to write train.jsonl, val.jsonl, and meta.json")
+	trainCount := flags.Int("train-count", 4000, "number of training examples")
+	valCount := flags.Int("val-count", 500, "number of validation examples")
+	minOperand := flags.Int("min-operand", 0, "minimum operand value")
+	maxOperand := flags.Int("max-operand", 20, "maximum operand value")
+	operations := flags.String("operations", "add,sub,mul,div", "comma-separated operations: add,sub,mul,div")
+	seed := flags.Int64("seed", 1, "random seed")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *outputDir == "" {
+		fmt.Fprintln(stderr, "output-dir is required")
+		flags.Usage()
+		return 1
+	}
+
+	cfg := arithmetic.GenerateConfig{
+		TrainCount: *trainCount,
+		ValCount:   *valCount,
+		MinOperand: *minOperand,
+		MaxOperand: *maxOperand,
+		Operations: splitCSV(*operations),
+		Seed:       *seed,
+	}
+	if err := arithmetic.GenerateDataset(*outputDir, cfg); err != nil {
+		fmt.Fprintf(stderr, "generate dataset: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "wrote arithmetic dataset to %s\n", *outputDir)
+	return 0
+}
+
+func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("train-math", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	dataDir := flags.String("data-dir", "", "directory containing train.jsonl and val.jsonl")
+	checkpointPath := flags.String("checkpoint", "", "path to write model checkpoint")
+	resumePath := flags.String("resume", "", "optional checkpoint to resume from")
+	contextSize := flags.Int("context-size", 32, "autoregressive context size")
+	embeddingDim := flags.Int("embedding-dim", 32, "embedding size")
+	hiddenDim := flags.Int("hidden-dim", 128, "hidden size")
+	epochs := flags.Int("epochs", 10, "number of training epochs")
+	batchSize := flags.Int("batch-size", 64, "batch size")
+	learningRate := flags.Float64("learning-rate", 0.01, "optimizer learning rate")
+	seed := flags.Int64("seed", 1, "random seed")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *dataDir == "" || *checkpointPath == "" {
+		fmt.Fprintln(stderr, "data-dir and checkpoint are required")
+		flags.Usage()
+		return 1
+	}
+
+	trainExamples, valExamples, err := loadArithmeticDatasets(*dataDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "load dataset: %v\n", err)
+		return 1
+	}
+	tok := tokenizer.NewByteTokenizer()
+	trainSeq, err := arithmetic.BuildTrainingSequences(trainExamples, tok, *contextSize)
+	if err != nil {
+		fmt.Fprintf(stderr, "build train sequences: %v\n", err)
+		return 1
+	}
+	valSeq, err := arithmetic.BuildTrainingSequences(valExamples, tok, *contextSize)
+	if err != nil {
+		fmt.Fprintf(stderr, "build val sequences: %v\n", err)
+		return 1
+	}
+
+	trainer, err := loadOrCreateMathTrainer(*resumePath, mathlm.Config{
+		VocabSize:    tok.VocabSize(),
+		ContextSize:  *contextSize,
+		EmbeddingDim: *embeddingDim,
+		HiddenDim:    *hiddenDim,
+		Seed:         *seed,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "load trainer: %v\n", err)
+		return 1
+	}
+
+	before, err := mathlm.EvaluateExamples(trainer.Model, valExamples, maxCompletionTokens(valExamples))
+	if err != nil {
+		fmt.Fprintf(stderr, "evaluate before training: %v\n", err)
+		return 1
+	}
+	report, err := trainer.Train(trainSeq, valSeq, mathlm.TrainingConfig{
+		Epochs:       *epochs,
+		BatchSize:    *batchSize,
+		LearningRate: *learningRate,
+		Beta1:        0.9,
+		Beta2:        0.999,
+		Epsilon:      1e-8,
+		Seed:         *seed,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "train model: %v\n", err)
+		return 1
+	}
+	after, err := mathlm.EvaluateExamples(trainer.Model, valExamples, maxCompletionTokens(valExamples))
+	if err != nil {
+		fmt.Fprintf(stderr, "evaluate after training: %v\n", err)
+		return 1
+	}
+	if err := mathlm.SaveCheckpoint(*checkpointPath, trainer); err != nil {
+		fmt.Fprintf(stderr, "save checkpoint: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "train_loss=%.4f val_loss=%.4f steps=%d\n", report.TrainLoss, report.ValLoss, report.Steps)
+	fmt.Fprintf(stdout, "val_accuracy_before=%.4f val_accuracy_after=%.4f\n", before.Accuracy, after.Accuracy)
+	fmt.Fprintf(stdout, "checkpoint=%s\n", *checkpointPath)
+	return 0
+}
+
+func runEvalMath(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("eval-math", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	checkpointPath := flags.String("checkpoint", "", "path to model checkpoint")
+	dataPath := flags.String("data", "", "path to validation jsonl file")
+	maxTokens := flags.Int("max-tokens", 0, "max completion tokens; defaults to dataset-driven value")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *checkpointPath == "" || *dataPath == "" {
+		fmt.Fprintln(stderr, "checkpoint and data are required")
+		flags.Usage()
+		return 1
+	}
+
+	trainer, err := mathlm.LoadCheckpoint(*checkpointPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load checkpoint: %v\n", err)
+		return 1
+	}
+	examples, err := arithmetic.LoadExamples(*dataPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load examples: %v\n", err)
+		return 1
+	}
+	limit := *maxTokens
+	if limit <= 0 {
+		limit = maxCompletionTokens(examples)
+	}
+	report, err := mathlm.EvaluateExamples(trainer.Model, examples, limit)
+	if err != nil {
+		fmt.Fprintf(stderr, "evaluate model: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "accuracy=%.4f correct=%d total=%d max_tokens=%d\n", report.Accuracy, report.Correct, report.Total, report.MaxTokens)
+	return 0
+}
+
+func runGenerateMath(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("generate-math", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	checkpointPath := flags.String("checkpoint", "", "path to model checkpoint")
+	prompt := flags.String("prompt", "", "prompt text to complete")
+	maxTokens := flags.Int("max-tokens", 8, "number of tokens to generate")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *checkpointPath == "" || *prompt == "" {
+		fmt.Fprintln(stderr, "checkpoint and prompt are required")
+		flags.Usage()
+		return 1
+	}
+
+	trainer, err := mathlm.LoadCheckpoint(*checkpointPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load checkpoint: %v\n", err)
+		return 1
+	}
+	engine, err := runtime.NewEngine(tokenizer.NewByteTokenizer(), trainer.Model, sampler.NewGreedySampler())
+	if err != nil {
+		fmt.Fprintf(stderr, "create engine: %v\n", err)
+		return 1
+	}
+	output, err := engine.GenerateWithOptions(*prompt, runtime.GenerateOptions{
+		MaxTokens:  *maxTokens,
+		StopTokens: []int{int('\n')},
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "generate math: %v\n", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, output)
@@ -614,4 +828,52 @@ func serveGeneratePolicy(backend string) server.GeneratePolicy {
 	default:
 		return server.GeneratePolicy{}
 	}
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func loadArithmeticDatasets(dataDir string) ([]arithmetic.Example, []arithmetic.Example, error) {
+	trainPath := filepath.Join(dataDir, "train.jsonl")
+	valPath := filepath.Join(dataDir, "val.jsonl")
+	train, err := arithmetic.LoadExamples(trainPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	val, err := arithmetic.LoadExamples(valPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	return train, val, nil
+}
+
+func loadOrCreateMathTrainer(resumePath string, cfg mathlm.Config) (*mathlm.Trainer, error) {
+	if resumePath != "" {
+		return mathlm.LoadCheckpoint(resumePath)
+	}
+	model, err := mathlm.NewModel(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return mathlm.NewTrainer(model)
+}
+
+func maxCompletionTokens(examples []arithmetic.Example) int {
+	maxTokens := 1
+	for _, example := range examples {
+		length := len(example.Completion) + 1
+		if length > maxTokens {
+			maxTokens = length
+		}
+	}
+	return maxTokens
 }
