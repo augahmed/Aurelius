@@ -71,7 +71,7 @@ go run ./cmd/aurelius generate-gpt2 -model-config /path/to/config.json -weights 
 go run ./cmd/aurelius emit-gpt2-observation -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -prompt "hello world" -top-k 5
 go run ./cmd/aurelius inspect-gpt2-next -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -prompt "hello world" -top-k 5
 go run ./cmd/aurelius validate-gpt2 -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -fixture /path/to/reference.json
-go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic
+go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic -levels 1,2,3,4,5
 go run ./cmd/aurelius train-math -data-dir ./data/arithmetic -checkpoint ./artifacts/mathlm.json
 go run ./cmd/aurelius eval-math -checkpoint ./artifacts/mathlm.json -data ./data/arithmetic/val.jsonl
 go run ./cmd/aurelius generate-math -checkpoint ./artifacts/mathlm.json -prompt "12 + 7 = "
@@ -111,13 +111,21 @@ When `serve` is using the GPT-2 backend, the web path now applies conservative r
 
 Aurelius now includes a student-scale from-scratch training path for arithmetic. It uses:
 
-- synthetic arithmetic JSONL datasets
+- synthetic arithmetic JSONL datasets with curriculum metadata
 - the existing byte tokenizer for a minimal training-first path
 - a small fixed-context autoregressive MLP language model
 - JSON checkpoints for save/resume
-- exact-match evaluation on held-out arithmetic prompts
+- exact-match evaluation on held-out arithmetic prompts, grouped by operation and curriculum level
 
 This path is intentionally small and educational. It is not a frontier LLM training stack and it does not replace the existing GPT-2 inference path.
+
+Curriculum levels let you scale data difficulty without changing the model first:
+
+```bash
+go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l1 -operations add,sub -levels 1
+go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l1-l3 -operations add,sub -levels 1,2,3
+go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-word -operations word -levels 6
+```
 
 ## Development Commands
 

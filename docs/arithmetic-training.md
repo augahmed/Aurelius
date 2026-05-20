@@ -18,8 +18,8 @@ This is not a frontier LLM training stack and it does not replace the existing G
 Datasets are written as JSONL with one example per line:
 
 ```json
-{"prompt":"2 + 3 = ","completion":"5","operation":"add"}
-{"prompt":"What is 12 * 4? ","completion":"48","operation":"mul"}
+{"prompt":"2 + 3 = ","completion":"5","operation":"add","level":1,"min_operand":0,"max_operand":9,"template":"equation"}
+{"prompt":"What is 12 * 4? ","completion":"48","operation":"mul","level":4,"min_operand":0,"max_operand":12,"template":"question"}
 ```
 
 The generator writes:
@@ -31,7 +31,20 @@ The generator writes:
   meta.json
 ```
 
-`meta.json` records operand ranges, split sizes, enabled operations, seed, and tokenizer choice.
+`meta.json` records operand ranges, split sizes, enabled operations, enabled curriculum levels, seed, and tokenizer choice.
+
+## Curriculum Levels
+
+The generator supports explicit levels:
+
+- `1`: single-digit addition and subtraction
+- `2`: two-digit addition and subtraction without carry or borrow
+- `3`: two-digit addition and subtraction with carry or borrow
+- `4`: small multiplication tables
+- `5`: exact integer division
+- `6`: simple two-step word problems
+
+Each generated example includes metadata such as `level`, `operation`, `requires_carry`, `requires_borrow`, and `template`. Train and validation data cycle through compatible level/operation pairs before shuffling, so held-out examples preserve the same coverage for grouped metrics.
 
 ## Training Workflow
 
@@ -45,6 +58,31 @@ go run ./cmd/aurelius gen-math-data \
   -min-operand 0 \
   -max-operand 20 \
   -operations add,sub,mul,div \
+  -levels 1,2,3,4,5 \
+  -seed 1
+```
+
+Generate only the easiest curriculum levels:
+
+```bash
+go run ./cmd/aurelius gen-math-data \
+  -output-dir ./data/arithmetic-l1-l2 \
+  -train-count 3000 \
+  -val-count 500 \
+  -operations add,sub \
+  -levels 1,2 \
+  -seed 1
+```
+
+Generate word problems:
+
+```bash
+go run ./cmd/aurelius gen-math-data \
+  -output-dir ./data/arithmetic-word \
+  -train-count 2000 \
+  -val-count 300 \
+  -operations word \
+  -levels 6 \
   -seed 1
 ```
 
@@ -84,6 +122,26 @@ go run ./cmd/aurelius eval-math \
 ```
 
 The evaluator reports exact-match accuracy on generated completions.
+
+It also reports grouped accuracy:
+
+```text
+accuracy=0.1000 correct=5 total=50 max_tokens=3
+operation[add]=0.1250 correct=3 total=24
+operation[sub]=0.0769 correct=2 total=26
+level[1]=0.1000 correct=5 total=50
+```
+
+Use these grouped metrics to decide when to add harder levels. A practical starting sequence is:
+
+1. train on levels `1`
+2. train on levels `1,2`
+3. train on levels `1,2,3`
+4. add multiplication with level `4`
+5. add division with level `5`
+6. add word problems with level `6`
+
+Training uses each prompt as context and optimizes only the answer plus trailing newline. This keeps the small model focused on answer prediction instead of spending most updates learning to reproduce prompt text.
 
 ## Inference
 

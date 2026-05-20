@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/augahmed/aurelius/internal/arithmetic"
@@ -105,7 +107,8 @@ func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int 
 	valCount := flags.Int("val-count", 500, "number of validation examples")
 	minOperand := flags.Int("min-operand", 0, "minimum operand value")
 	maxOperand := flags.Int("max-operand", 20, "maximum operand value")
-	operations := flags.String("operations", "add,sub,mul,div", "comma-separated operations: add,sub,mul,div")
+	operations := flags.String("operations", "add,sub,mul,div", "comma-separated operations: add,sub,mul,div,word")
+	levels := flags.String("levels", "1,2,3,4,5", "comma-separated curriculum levels: 1,2,3,4,5,6")
 	seed := flags.Int64("seed", 1, "random seed")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "parse flags: %v\n", err)
@@ -117,12 +120,19 @@ func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int 
 		return 1
 	}
 
+	parsedLevels, err := splitInts(*levels)
+	if err != nil {
+		fmt.Fprintf(stderr, "parse levels: %v\n", err)
+		return 1
+	}
+
 	cfg := arithmetic.GenerateConfig{
 		TrainCount: *trainCount,
 		ValCount:   *valCount,
 		MinOperand: *minOperand,
 		MaxOperand: *maxOperand,
 		Operations: splitCSV(*operations),
+		Levels:     parsedLevels,
 		Seed:       *seed,
 	}
 	if err := arithmetic.GenerateDataset(*outputDir, cfg); err != nil {
@@ -256,7 +266,7 @@ func runEvalMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "evaluate model: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "accuracy=%.4f correct=%d total=%d max_tokens=%d\n", report.Accuracy, report.Correct, report.Total, report.MaxTokens)
+	writeEvalReport(stdout, report)
 	return 0
 }
 
@@ -840,6 +850,53 @@ func splitCSV(value string) []string {
 		}
 	}
 	return out
+}
+
+func splitInts(value string) ([]int, error) {
+	parts := strings.Split(value, ",")
+	out := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid integer %q", part)
+		}
+		out = append(out, parsed)
+	}
+	return out, nil
+}
+
+func writeEvalReport(stdout io.Writer, report mathlm.EvalReport) {
+	fmt.Fprintf(stdout, "accuracy=%.4f correct=%d total=%d max_tokens=%d\n", report.Accuracy, report.Correct, report.Total, report.MaxTokens)
+	for _, operation := range sortedStringKeys(report.ByOperation) {
+		group := report.ByOperation[operation]
+		fmt.Fprintf(stdout, "operation[%s]=%.4f correct=%d total=%d\n", operation, group.Accuracy, group.Correct, group.Total)
+	}
+	for _, level := range sortedIntKeys(report.ByLevel) {
+		group := report.ByLevel[level]
+		fmt.Fprintf(stdout, "level[%d]=%.4f correct=%d total=%d\n", level, group.Accuracy, group.Correct, group.Total)
+	}
+}
+
+func sortedStringKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+func sortedIntKeys[V any](values map[int]V) []int {
+	keys := make([]int, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 func loadArithmeticDatasets(dataDir string) ([]arithmetic.Example, []arithmetic.Example, error) {

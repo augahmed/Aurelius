@@ -11,10 +11,18 @@ import (
 )
 
 type EvalReport struct {
-	Total     int     `json:"total"`
-	Correct   int     `json:"correct"`
-	Accuracy  float64 `json:"accuracy"`
-	MaxTokens int     `json:"max_tokens"`
+	Total       int                  `json:"total"`
+	Correct     int                  `json:"correct"`
+	Accuracy    float64              `json:"accuracy"`
+	MaxTokens   int                  `json:"max_tokens"`
+	ByOperation map[string]EvalGroup `json:"by_operation"`
+	ByLevel     map[int]EvalGroup    `json:"by_level"`
+}
+
+type EvalGroup struct {
+	Total    int     `json:"total"`
+	Correct  int     `json:"correct"`
+	Accuracy float64 `json:"accuracy"`
 }
 
 func EvaluateExamples(model *Model, examples []arithmetic.Example, maxTokens int) (EvalReport, error) {
@@ -30,7 +38,12 @@ func EvaluateExamples(model *Model, examples []arithmetic.Example, maxTokens int
 		return EvalReport{}, err
 	}
 
-	report := EvalReport{Total: len(examples), MaxTokens: maxTokens}
+	report := EvalReport{
+		Total:       len(examples),
+		MaxTokens:   maxTokens,
+		ByOperation: make(map[string]EvalGroup),
+		ByLevel:     make(map[int]EvalGroup),
+	}
 	for _, example := range examples {
 		output, err := engine.GenerateWithOptions(example.Prompt, runtime.GenerateOptions{
 			MaxTokens:  maxTokens,
@@ -41,12 +54,25 @@ func EvaluateExamples(model *Model, examples []arithmetic.Example, maxTokens int
 		}
 		generated := strings.TrimSpace(strings.TrimPrefix(output, example.Prompt))
 		expected := strings.TrimSpace(example.Completion)
-		if generated == expected {
+		correct := generated == expected
+		if correct {
 			report.Correct++
 		}
+		addGroupResult(report.ByOperation, example.Operation, correct)
+		addGroupResult(report.ByLevel, example.Level, correct)
 	}
 	if report.Total > 0 {
 		report.Accuracy = float64(report.Correct) / float64(report.Total)
 	}
 	return report, nil
+}
+
+func addGroupResult[K comparable](groups map[K]EvalGroup, key K, correct bool) {
+	group := groups[key]
+	group.Total++
+	if correct {
+		group.Correct++
+	}
+	group.Accuracy = float64(group.Correct) / float64(group.Total)
+	groups[key] = group
 }

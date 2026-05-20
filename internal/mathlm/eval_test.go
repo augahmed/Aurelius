@@ -22,8 +22,8 @@ func TestEvaluateExamples(t *testing.T) {
 		t.Fatalf("NewTrainer error: %v", err)
 	}
 	examples := []arithmetic.Example{
-		{Prompt: "2 + 2 = ", Completion: "4", Operation: "add"},
-		{Prompt: "3 + 1 = ", Completion: "4", Operation: "add"},
+		{Prompt: "2 + 2 = ", Completion: "4", Operation: "add", Level: 1},
+		{Prompt: "3 + 1 = ", Completion: "4", Operation: "add", Level: 1},
 	}
 	sequences, err := arithmetic.BuildTrainingSequences(examples, byteTok(), 8)
 	if err != nil {
@@ -46,5 +46,11 @@ func TestEvaluateExamples(t *testing.T) {
 	}
 	if report.Total != 2 {
 		t.Fatalf("report.Total = %d, want 2", report.Total)
+	}
+	if report.ByOperation["add"].Total != 2 {
+		t.Fatalf("operation add total = %d, want 2", report.ByOperation["add"].Total)
+	}
+	if report.ByLevel[1].Total != 2 {
+		t.Fatalf("level 1 total = %d, want 2", report.ByLevel[1].Total)
 	}
 }

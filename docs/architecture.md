@@ -51,7 +51,7 @@ The prototype is CPU-only and correctness-first. It uses a deterministic toy tra
 Current implementation boundaries:
 
 - `internal/model` owns model configuration and forward-pass contracts.
-- `internal/arithmetic` owns synthetic arithmetic dataset generation and sequence construction for training.
+- `internal/arithmetic` owns synthetic arithmetic curriculum generation, example metadata, and sequence construction for training.
 - `internal/transformer` implements a tiny model with deterministic embeddings, explicit decoder blocks, and an output projection.
 - `internal/runtime` owns the autoregressive loop and chooses between uncached full-sequence decoding and optional cache-backed incremental decoding.
 - `internal/tokenizer` now contains both the prototype byte tokenizer and a GPT-2 style BPE tokenizer that loads `vocab.json` and `merges.txt`.
@@ -94,11 +94,13 @@ This keeps state management lightweight while preserving a clean boundary betwee
 
 The current training path is intentionally narrower than the GPT-2 inference stack:
 
-- dataset generation writes JSONL records with `prompt` and `completion`
+- dataset generation writes JSONL records with `prompt`, `completion`, operation, level, operand-range, template, and carry/borrow metadata
+- curriculum generation balances compatible level/operation pairs so train and validation splits preserve coverage for grouped evaluation
 - tokenization reuses the byte tokenizer so the first end-to-end training loop stays simple
-- training examples are left-padded fixed-context windows for next-token prediction
+- training examples are left-padded fixed-context windows that use the prompt as context and optimize only completion/newline targets
 - the trainable model is a small autoregressive MLP language model rather than a backprop-through-transformer implementation
 - checkpoints serialize model weights and optimizer state as JSON for easy inspection and resume
+- evaluation reports exact-match accuracy overall, by operation, and by curriculum level
 
 This is an educational bridge toward “train from scratch” rather than a claim of a production-grade LLM training system.
 
