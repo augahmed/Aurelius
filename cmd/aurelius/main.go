@@ -150,9 +150,11 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	dataDir := flags.String("data-dir", "", "directory containing train.jsonl and val.jsonl")
 	checkpointPath := flags.String("checkpoint", "", "path to write model checkpoint")
 	resumePath := flags.String("resume", "", "optional checkpoint to resume from")
+	modelType := flags.String("model", "mlp", "math model backend: mlp or transformer")
 	contextSize := flags.Int("context-size", 32, "autoregressive context size")
 	embeddingDim := flags.Int("embedding-dim", 32, "embedding size")
 	hiddenDim := flags.Int("hidden-dim", 128, "hidden size")
+	numHeads := flags.Int("num-heads", 1, "attention heads for -model transformer")
 	epochs := flags.Int("epochs", 10, "number of training epochs")
 	batchSize := flags.Int("batch-size", 64, "batch size")
 	learningRate := flags.Float64("learning-rate", 0.01, "optimizer learning rate")
@@ -184,11 +186,18 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 
-	trainer, err := loadOrCreateMathTrainer(*resumePath, mathlm.Config{
+	trainer, err := loadOrCreateAnyMathTrainer(*resumePath, *modelType, mathlm.Config{
 		VocabSize:    tok.VocabSize(),
 		ContextSize:  *contextSize,
 		EmbeddingDim: *embeddingDim,
 		HiddenDim:    *hiddenDim,
+		Seed:         *seed,
+	}, mathlm.TransformerConfig{
+		VocabSize:    tok.VocabSize(),
+		ContextSize:  *contextSize,
+		EmbeddingDim: *embeddingDim,
+		NumHeads:     *numHeads,
+		MLPDim:       *hiddenDim,
 		Seed:         *seed,
 	})
 	if err != nil {
@@ -196,7 +205,7 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 
-	before, err := mathlm.EvaluateExamples(trainer.Model, valExamples, maxCompletionTokens(valExamples))
+	before, err := mathlm.EvaluateExamples(trainer.Model(), valExamples, maxCompletionTokens(valExamples))
 	if err != nil {
 		fmt.Fprintf(stderr, "evaluate before training: %v\n", err)
 		return 1
@@ -214,17 +223,17 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "train model: %v\n", err)
 		return 1
 	}
-	after, err := mathlm.EvaluateExamples(trainer.Model, valExamples, maxCompletionTokens(valExamples))
+	after, err := mathlm.EvaluateExamples(trainer.Model(), valExamples, maxCompletionTokens(valExamples))
 	if err != nil {
 		fmt.Fprintf(stderr, "evaluate after training: %v\n", err)
 		return 1
 	}
-	if err := mathlm.SaveCheckpoint(*checkpointPath, trainer); err != nil {
+	if err := mathlm.SaveAnyCheckpoint(*checkpointPath, trainer); err != nil {
 		fmt.Fprintf(stderr, "save checkpoint: %v\n", err)
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "train_loss=%.4f val_loss=%.4f steps=%d\n", report.TrainLoss, report.ValLoss, report.Steps)
+	fmt.Fprintf(stdout, "model=%s train_loss=%.4f val_loss=%.4f steps=%d\n", trainer.ModelType, report.TrainLoss, report.ValLoss, report.Steps)
 	fmt.Fprintf(stdout, "val_accuracy_before=%.4f val_accuracy_after=%.4f\n", before.Accuracy, after.Accuracy)
 	fmt.Fprintf(stdout, "checkpoint=%s\n", *checkpointPath)
 	return 0
@@ -247,7 +256,7 @@ func runEvalMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 
-	trainer, err := mathlm.LoadCheckpoint(*checkpointPath)
+	trainer, err := mathlm.LoadAnyCheckpoint(*checkpointPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "load checkpoint: %v\n", err)
 		return 1
@@ -261,7 +270,7 @@ func runEvalMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	if limit <= 0 {
 		limit = maxCompletionTokens(examples)
 	}
-	report, err := mathlm.EvaluateExamples(trainer.Model, examples, limit)
+	report, err := mathlm.EvaluateExamples(trainer.Model(), examples, limit)
 	if err != nil {
 		fmt.Fprintf(stderr, "evaluate model: %v\n", err)
 		return 1
@@ -287,12 +296,12 @@ func runGenerateMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 
-	trainer, err := mathlm.LoadCheckpoint(*checkpointPath)
+	trainer, err := mathlm.LoadAnyCheckpoint(*checkpointPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "load checkpoint: %v\n", err)
 		return 1
 	}
-	engine, err := runtime.NewEngine(tokenizer.NewByteTokenizer(), trainer.Model, sampler.NewGreedySampler())
+	engine, err := runtime.NewEngine(tokenizer.NewByteTokenizer(), trainer.Model(), sampler.NewGreedySampler())
 	if err != nil {
 		fmt.Fprintf(stderr, "create engine: %v\n", err)
 		return 1
@@ -922,6 +931,36 @@ func loadOrCreateMathTrainer(resumePath string, cfg mathlm.Config) (*mathlm.Trai
 		return nil, err
 	}
 	return mathlm.NewTrainer(model)
+}
+
+func loadOrCreateAnyMathTrainer(resumePath string, modelType string, mlpCfg mathlm.Config, transformerCfg mathlm.TransformerConfig) (*mathlm.AnyTrainer, error) {
+	if resumePath != "" {
+		return mathlm.LoadAnyCheckpoint(resumePath)
+	}
+	switch modelType {
+	case "mlp":
+		model, err := mathlm.NewModel(mlpCfg)
+		if err != nil {
+			return nil, err
+		}
+		trainer, err := mathlm.NewTrainer(model)
+		if err != nil {
+			return nil, err
+		}
+		return mathlm.NewMLPAnyTrainer(trainer)
+	case "transformer":
+		model, err := mathlm.NewTransformerModel(transformerCfg)
+		if err != nil {
+			return nil, err
+		}
+		trainer, err := mathlm.NewTransformerTrainer(model)
+		if err != nil {
+			return nil, err
+		}
+		return mathlm.NewTransformerAnyTrainer(trainer)
+	default:
+		return nil, fmt.Errorf("unsupported math model %q", modelType)
+	}
 }
 
 func maxCompletionTokens(examples []arithmetic.Example) int {

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/augahmed/aurelius/internal/arithmetic"
+	sharedmodel "github.com/augahmed/aurelius/internal/model"
 	"github.com/augahmed/aurelius/internal/runtime"
 	"github.com/augahmed/aurelius/internal/sampler"
 	"github.com/augahmed/aurelius/internal/tokenizer"
@@ -25,7 +26,7 @@ type EvalGroup struct {
 	Accuracy float64 `json:"accuracy"`
 }
 
-func EvaluateExamples(model *Model, examples []arithmetic.Example, maxTokens int) (EvalReport, error) {
+func EvaluateExamples(model sharedmodel.Model, examples []arithmetic.Example, maxTokens int) (EvalReport, error) {
 	if model == nil {
 		return EvalReport{}, fmt.Errorf("model is required")
 	}

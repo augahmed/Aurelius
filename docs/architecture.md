@@ -98,8 +98,10 @@ The current training path is intentionally narrower than the GPT-2 inference sta
 - curriculum generation balances compatible level/operation pairs so train and validation splits preserve coverage for grouped evaluation
 - tokenization reuses the byte tokenizer so the first end-to-end training loop stays simple
 - training examples are left-padded fixed-context windows that use the prompt as context and optimize only completion/newline targets
-- the trainable model is a small autoregressive MLP language model rather than a backprop-through-transformer implementation
-- checkpoints serialize model weights and optimizer state as JSON for easy inspection and resume
+- `train-math -model mlp` uses the original small autoregressive MLP language model
+- `train-math -model transformer` uses a one-layer causal decoder block with token embeddings, positional embeddings, layer norms, self-attention, an MLP block, residual connections, and an LM head
+- the first transformer training slice updates only the LM head over fixed transformer features; full backpropagation through attention and MLP weights remains a future milestone
+- checkpoints serialize model type, model weights, and optimizer state as JSON for easy inspection and resume
 - evaluation reports exact-match accuracy overall, by operation, and by curriculum level
 
 This is an educational bridge toward “train from scratch” rather than a claim of a production-grade LLM training system.

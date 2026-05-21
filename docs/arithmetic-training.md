@@ -111,6 +111,22 @@ go run ./cmd/aurelius train-math \
   -epochs 5
 ```
 
+Train the tiny transformer backend:
+
+```bash
+go run ./cmd/aurelius train-math \
+  -model transformer \
+  -data-dir ./data/arithmetic \
+  -checkpoint ./artifacts/math-transformer.json \
+  -context-size 32 \
+  -embedding-dim 32 \
+  -hidden-dim 128 \
+  -num-heads 4 \
+  -epochs 10 \
+  -batch-size 64 \
+  -learning-rate 0.01
+```
+
 ## Evaluation
 
 Evaluate on held-out examples:
@@ -156,7 +172,9 @@ go run ./cmd/aurelius generate-math \
 
 ## Model Shape
 
-The arithmetic trainer currently uses:
+The arithmetic trainer supports two backends:
+
+`-model mlp` uses:
 
 - byte tokenizer with vocabulary size `256`
 - fixed left-padded context window
@@ -165,12 +183,22 @@ The arithmetic trainer currently uses:
 - output projection to next-token logits
 - Adam optimizer
 
-This is a real autoregressive model and it really trains from random initialization, but it is not yet a transformer training system.
+`-model transformer` uses:
+
+- byte tokenizer with vocabulary size `256`
+- token and positional embeddings
+- one causal self-attention block
+- layer norms
+- residual connections
+- MLP block with GELU
+- output projection to next-token logits
+
+The transformer backend is currently a forward-path and checkpointing milestone. It trains only the LM head over fixed transformer features, so it is useful for validating architecture, checkpoint loading, and CLI integration, but it is not yet the full backprop-through-transformer trainer needed for serious arithmetic improvement.
 
 ## Limitations
 
 - byte-level tokenization is simple, not efficient
-- the model is a small MLP LM, not a decoder-only transformer with training support
+- the transformer backend does not yet backpropagate through embeddings, attention, layer norms, or MLP block weights
 - arithmetic quality depends heavily on operand range and dataset size
 - exact-match accuracy is useful for arithmetic but not a general language-model benchmark
 - the current training loop is CPU-first and educational rather than optimized
