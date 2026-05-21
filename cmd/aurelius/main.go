@@ -32,6 +32,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		switch args[0] {
 		case "gen-math-data":
 			return runGenerateMathData(args[1:], stdout, stderr)
+		case "mix-math-data":
+			return runMixMathData(args[1:], stdout, stderr)
 		case "train-math":
 			return runTrainMath(args[1:], stdout, stderr)
 		case "eval-math":
@@ -109,6 +111,8 @@ func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int 
 	maxOperand := flags.Int("max-operand", 20, "maximum operand value")
 	operations := flags.String("operations", "add,sub,mul,div", "comma-separated operations: add,sub,mul,div,word")
 	levels := flags.String("levels", "1,2,3,4,5", "comma-separated curriculum levels: 1,2,3,4,5,6")
+	answerDigits := flags.String("answer-digits", "", "optional comma-separated answer digit buckets, for example 1,2")
+	smallDifferenceOnly := flags.Bool("small-difference-only", false, "only generate subtraction examples with one-digit differences")
 	seed := flags.Int64("seed", 1, "random seed")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "parse flags: %v\n", err)
@@ -125,21 +129,60 @@ func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "parse levels: %v\n", err)
 		return 1
 	}
+	parsedAnswerDigits, err := splitInts(*answerDigits)
+	if err != nil {
+		fmt.Fprintf(stderr, "parse answer-digits: %v\n", err)
+		return 1
+	}
 
 	cfg := arithmetic.GenerateConfig{
-		TrainCount: *trainCount,
-		ValCount:   *valCount,
-		MinOperand: *minOperand,
-		MaxOperand: *maxOperand,
-		Operations: splitCSV(*operations),
-		Levels:     parsedLevels,
-		Seed:       *seed,
+		TrainCount:          *trainCount,
+		ValCount:            *valCount,
+		MinOperand:          *minOperand,
+		MaxOperand:          *maxOperand,
+		Operations:          splitCSV(*operations),
+		Levels:              parsedLevels,
+		AnswerDigits:        parsedAnswerDigits,
+		SmallDifferenceOnly: *smallDifferenceOnly,
+		Seed:                *seed,
 	}
 	if err := arithmetic.GenerateDataset(*outputDir, cfg); err != nil {
 		fmt.Fprintf(stderr, "generate dataset: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "wrote arithmetic dataset to %s\n", *outputDir)
+	return 0
+}
+
+func runMixMathData(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("mix-math-data", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	outputDir := flags.String("output-dir", "", "directory to write mixed train.jsonl, val.jsonl, and meta.json")
+	inputs := flags.String("inputs", "", "comma-separated dataset directories with integer weights, for example ./data/base:1,./data/targeted:2")
+	seed := flags.Int64("seed", 1, "random seed")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *outputDir == "" || *inputs == "" {
+		fmt.Fprintln(stderr, "output-dir and inputs are required")
+		flags.Usage()
+		return 1
+	}
+	sources, err := parseMixSources(*inputs)
+	if err != nil {
+		fmt.Fprintf(stderr, "parse inputs: %v\n", err)
+		return 1
+	}
+	if err := arithmetic.MixDatasets(*outputDir, arithmetic.MixConfig{
+		Sources: sources,
+		Seed:    *seed,
+	}); err != nil {
+		fmt.Fprintf(stderr, "mix dataset: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "wrote mixed arithmetic dataset to %s\n", *outputDir)
 	return 0
 }
 
@@ -246,6 +289,8 @@ func runEvalMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	checkpointPath := flags.String("checkpoint", "", "path to model checkpoint")
 	dataPath := flags.String("data", "", "path to validation jsonl file")
 	maxTokens := flags.Int("max-tokens", 0, "max completion tokens; defaults to dataset-driven value")
+	showErrors := flags.Int("show-errors", 0, "print up to N incorrect examples with metadata")
+	errorsOut := flags.String("errors-out", "", "write all incorrect examples and grouped template counts as JSON")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "parse flags: %v\n", err)
 		return 2
@@ -270,12 +315,25 @@ func runEvalMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	if limit <= 0 {
 		limit = maxCompletionTokens(examples)
 	}
-	report, err := mathlm.EvaluateExamples(trainer.Model(), examples, limit)
+	collectErrors := *showErrors > 0 || *errorsOut != ""
+	report, err := mathlm.EvaluateExamplesWithOptions(trainer.Model(), examples, limit, mathlm.EvalOptions{
+		CollectErrors: collectErrors,
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "evaluate model: %v\n", err)
 		return 1
 	}
 	writeEvalReport(stdout, report)
+	if collectErrors {
+		writeEvalDebugReport(stdout, report, *showErrors)
+	}
+	if *errorsOut != "" {
+		if err := writeEvalErrorsFile(*errorsOut, report); err != nil {
+			fmt.Fprintf(stderr, "write errors: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "errors_out=%s\n", *errorsOut)
+	}
 	return 0
 }
 
@@ -878,6 +936,35 @@ func splitInts(value string) ([]int, error) {
 	return out, nil
 }
 
+func parseMixSources(value string) ([]arithmetic.MixSource, error) {
+	parts := strings.Split(value, ",")
+	sources := make([]arithmetic.MixSource, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		path, weightText, ok := strings.Cut(part, ":")
+		if !ok {
+			return nil, fmt.Errorf("input %q must use path:weight", part)
+		}
+		path = strings.TrimSpace(path)
+		weightText = strings.TrimSpace(weightText)
+		weight, err := strconv.Atoi(weightText)
+		if err != nil {
+			return nil, fmt.Errorf("invalid weight %q", weightText)
+		}
+		sources = append(sources, arithmetic.MixSource{
+			Path:   path,
+			Weight: weight,
+		})
+	}
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("at least one input is required")
+	}
+	return sources, nil
+}
+
 func writeEvalReport(stdout io.Writer, report mathlm.EvalReport) {
 	fmt.Fprintf(stdout, "accuracy=%.4f correct=%d total=%d max_tokens=%d\n", report.Accuracy, report.Correct, report.Total, report.MaxTokens)
 	for _, operation := range sortedStringKeys(report.ByOperation) {
@@ -888,6 +975,76 @@ func writeEvalReport(stdout io.Writer, report mathlm.EvalReport) {
 		group := report.ByLevel[level]
 		fmt.Fprintf(stdout, "level[%d]=%.4f correct=%d total=%d\n", level, group.Accuracy, group.Correct, group.Total)
 	}
+}
+
+func writeEvalDebugReport(stdout io.Writer, report mathlm.EvalReport, showErrors int) {
+	for _, template := range sortedStringKeys(report.ByTemplate) {
+		group := report.ByTemplate[template]
+		errors := group.Total - group.Correct
+		fmt.Fprintf(stdout, "template[%s]=%.4f correct=%d total=%d errors=%d\n", template, group.Accuracy, group.Correct, group.Total, errors)
+	}
+	for _, digits := range sortedIntKeys(report.ByAnswerDigits) {
+		group := report.ByAnswerDigits[digits]
+		errors := group.Total - group.Correct
+		fmt.Fprintf(stdout, "answer_digits[%d]=%.4f correct=%d total=%d errors=%d\n", digits, group.Accuracy, group.Correct, group.Total, errors)
+	}
+	for _, key := range sortedStringKeys(report.BySmallDifference) {
+		group := report.BySmallDifference[key]
+		errors := group.Total - group.Correct
+		fmt.Fprintf(stdout, "small_difference[%s]=%.4f correct=%d total=%d errors=%d\n", key, group.Accuracy, group.Correct, group.Total, errors)
+	}
+	if showErrors <= 0 {
+		return
+	}
+	limit := min(showErrors, len(report.Errors))
+	for i := 0; i < limit; i++ {
+		err := report.Errors[i]
+		fmt.Fprintf(stdout, "error[%d] prompt=%q expected=%q generated=%q operation=%s level=%d template=%s answer_digits=%d small_difference=%t carry=%t borrow=%t operands=%d..%d\n",
+			i+1,
+			err.Prompt,
+			err.Expected,
+			err.Generated,
+			err.Operation,
+			err.Level,
+			err.Template,
+			err.AnswerDigits,
+			err.SmallDifference,
+			err.RequiresCarry,
+			err.RequiresBorrow,
+			err.MinOperand,
+			err.MaxOperand,
+		)
+	}
+}
+
+func writeEvalErrorsFile(path string, report mathlm.EvalReport) error {
+	payload := struct {
+		Total             int                         `json:"total"`
+		Correct           int                         `json:"correct"`
+		Accuracy          float64                     `json:"accuracy"`
+		MaxTokens         int                         `json:"max_tokens"`
+		ByTemplate        map[string]mathlm.EvalGroup `json:"by_template"`
+		ByAnswerDigits    map[int]mathlm.EvalGroup    `json:"by_answer_digits"`
+		BySmallDifference map[string]mathlm.EvalGroup `json:"by_small_difference"`
+		Errors            []mathlm.EvalError          `json:"errors"`
+	}{
+		Total:             report.Total,
+		Correct:           report.Correct,
+		Accuracy:          report.Accuracy,
+		MaxTokens:         report.MaxTokens,
+		ByTemplate:        report.ByTemplate,
+		ByAnswerDigits:    report.ByAnswerDigits,
+		BySmallDifference: report.BySmallDifference,
+		Errors:            report.Errors,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal eval errors: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write eval errors file: %w", err)
+	}
+	return nil
 }
 
 func sortedStringKeys[V any](values map[string]V) []string {

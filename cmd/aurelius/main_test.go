@@ -11,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/augahmed/aurelius/internal/arithmetic"
 	"github.com/augahmed/aurelius/internal/gpt2"
+	"github.com/augahmed/aurelius/internal/mathlm"
 	"github.com/augahmed/aurelius/internal/runtime"
 	"github.com/augahmed/aurelius/internal/server"
 )
@@ -271,6 +273,151 @@ func TestServeGeneratePolicyForToy(t *testing.T) {
 	got := serveGeneratePolicy("toy")
 	if !reflect.DeepEqual(got, server.GeneratePolicy{}) {
 		t.Fatalf("serveGeneratePolicy() = %+v, want zero policy", got)
+	}
+}
+
+func TestRunEvalMathDebugErrors(t *testing.T) {
+	dir := t.TempDir()
+	checkpointPath := filepath.Join(dir, "math.json")
+	dataPath := filepath.Join(dir, "val.jsonl")
+	errorsPath := filepath.Join(dir, "errors.json")
+
+	model, err := mathlm.NewModel(mathlm.Config{
+		VocabSize:    256,
+		ContextSize:  8,
+		EmbeddingDim: 8,
+		HiddenDim:    16,
+		Seed:         21,
+	})
+	if err != nil {
+		t.Fatalf("NewModel error: %v", err)
+	}
+	trainer, err := mathlm.NewTrainer(model)
+	if err != nil {
+		t.Fatalf("NewTrainer error: %v", err)
+	}
+	if err := mathlm.SaveCheckpoint(checkpointPath, trainer); err != nil {
+		t.Fatalf("SaveCheckpoint error: %v", err)
+	}
+
+	example := arithmetic.Example{
+		Prompt:          "2 + 2 = ",
+		Completion:      "4",
+		Operation:       "add",
+		Level:           1,
+		Template:        "equation",
+		AnswerDigits:    1,
+		SmallDifference: true,
+		RequiresCarry:   false,
+		RequiresBorrow:  false,
+		MinOperand:      0,
+		MaxOperand:      9,
+	}
+	data, err := json.Marshal(example)
+	if err != nil {
+		t.Fatalf("Marshal example error: %v", err)
+	}
+	if err := os.WriteFile(dataPath, append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("WriteFile dataset error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"eval-math",
+		"-checkpoint", checkpointPath,
+		"-data", dataPath,
+		"-show-errors", "1",
+		"-errors-out", errorsPath,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "template[equation]=") {
+		t.Fatalf("stdout = %q, want template debug output", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "answer_digits[1]=") {
+		t.Fatalf("stdout = %q, want answer digit debug output", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "small_difference[true]=") {
+		t.Fatalf("stdout = %q, want small difference debug output", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "error[1]") {
+		t.Fatalf("stdout = %q, want shown error", stdout.String())
+	}
+	var payload struct {
+		ByTemplate        map[string]mathlm.EvalGroup `json:"by_template"`
+		ByAnswerDigits    map[int]mathlm.EvalGroup    `json:"by_answer_digits"`
+		BySmallDifference map[string]mathlm.EvalGroup `json:"by_small_difference"`
+		Errors            []mathlm.EvalError          `json:"errors"`
+	}
+	raw, err := os.ReadFile(errorsPath)
+	if err != nil {
+		t.Fatalf("ReadFile errors error: %v", err)
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("Unmarshal errors error: %v", err)
+	}
+	if payload.ByTemplate["equation"].Total != 1 {
+		t.Fatalf("template total = %d, want 1", payload.ByTemplate["equation"].Total)
+	}
+	if payload.ByAnswerDigits[1].Total != 1 {
+		t.Fatalf("answer digit total = %d, want 1", payload.ByAnswerDigits[1].Total)
+	}
+	if payload.BySmallDifference["true"].Total != 1 {
+		t.Fatalf("small difference total = %d, want 1", payload.BySmallDifference["true"].Total)
+	}
+	if len(payload.Errors) != 1 || payload.Errors[0].Expected != "4" || payload.Errors[0].Prompt != "2 + 2 = " {
+		t.Fatalf("unexpected errors payload: %+v", payload.Errors)
+	}
+}
+
+func TestRunMixMathData(t *testing.T) {
+	root := t.TempDir()
+	sourceA := filepath.Join(root, "a")
+	sourceB := filepath.Join(root, "b")
+	output := filepath.Join(root, "mixed")
+	if err := arithmetic.GenerateDataset(sourceA, arithmetic.GenerateConfig{
+		TrainCount: 2,
+		ValCount:   1,
+		Operations: []string{"add"},
+		Levels:     []int{1},
+		Seed:       1,
+	}); err != nil {
+		t.Fatalf("GenerateDataset(sourceA) error: %v", err)
+	}
+	if err := arithmetic.GenerateDataset(sourceB, arithmetic.GenerateConfig{
+		TrainCount:          2,
+		ValCount:            1,
+		Operations:          []string{"sub"},
+		Levels:              []int{2},
+		AnswerDigits:        []int{1},
+		SmallDifferenceOnly: true,
+		Seed:                2,
+	}); err != nil {
+		t.Fatalf("GenerateDataset(sourceB) error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"mix-math-data",
+		"-output-dir", output,
+		"-inputs", sourceA + ":1," + sourceB + ":2",
+		"-seed", "3",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "wrote mixed arithmetic dataset") {
+		t.Fatalf("stdout = %q, want success message", stdout.String())
+	}
+	train, err := arithmetic.LoadExamples(filepath.Join(output, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples train error: %v", err)
+	}
+	if len(train) != 6 {
+		t.Fatalf("len(train) = %d, want 6", len(train))
 	}
 }
 

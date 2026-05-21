@@ -2,6 +2,7 @@ package arithmetic
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,6 +42,24 @@ func TestGenerateDatasetAndLoadExamples(t *testing.T) {
 		if strings.TrimSpace(example.Prompt) == "" || strings.TrimSpace(example.Completion) == "" {
 			t.Fatalf("invalid example: %+v", example)
 		}
+	}
+}
+
+func TestLoadExamplesBackfillsAnswerMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.jsonl")
+	raw := `{"prompt":"29 - 21 = ","completion":"8","operation":"sub","level":2,"min_operand":10,"max_operand":99,"template":"equation"}` + "\n"
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+	examples, err := LoadExamples(path)
+	if err != nil {
+		t.Fatalf("LoadExamples error: %v", err)
+	}
+	if examples[0].AnswerDigits != 1 {
+		t.Fatalf("answer digits = %d, want 1", examples[0].AnswerDigits)
+	}
+	if !examples[0].SmallDifference {
+		t.Fatalf("expected small difference metadata: %+v", examples[0])
 	}
 }
 
@@ -100,6 +119,9 @@ func TestGenerateDatasetIncludesCurriculumMetadata(t *testing.T) {
 		if example.MinOperand > example.MaxOperand {
 			t.Fatalf("invalid operand metadata: %+v", example)
 		}
+		if example.AnswerDigits <= 0 {
+			t.Fatalf("invalid answer digit metadata: %+v", example)
+		}
 		if example.Level == 3 && example.Operation == "add" && !example.RequiresCarry {
 			t.Fatalf("level 3 addition should require carry: %+v", example)
 		}
@@ -119,6 +141,95 @@ func TestGenerateDatasetIncludesCurriculumMetadata(t *testing.T) {
 		if !seenPairs[pair] {
 			t.Fatalf("missing level/operation pair %s in generated dataset", pair)
 		}
+	}
+}
+
+func TestGenerateDatasetFiltersSmallDifferenceSubtraction(t *testing.T) {
+	dir := t.TempDir()
+	cfg := GenerateConfig{
+		TrainCount:          20,
+		ValCount:            10,
+		Operations:          []string{"sub"},
+		Levels:              []int{2},
+		AnswerDigits:        []int{1},
+		SmallDifferenceOnly: true,
+		Seed:                19,
+	}
+	if err := GenerateDataset(dir, cfg); err != nil {
+		t.Fatalf("GenerateDataset error: %v", err)
+	}
+	train, err := LoadExamples(filepath.Join(dir, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples error: %v", err)
+	}
+	for _, example := range train {
+		if example.Operation != "sub" || example.Level != 2 {
+			t.Fatalf("unexpected task: %+v", example)
+		}
+		if example.AnswerDigits != 1 {
+			t.Fatalf("answer digits = %d, want 1: %+v", example.AnswerDigits, example)
+		}
+		if !example.SmallDifference {
+			t.Fatalf("expected small difference metadata: %+v", example)
+		}
+	}
+}
+
+func TestMixDatasetsAppliesWeights(t *testing.T) {
+	root := t.TempDir()
+	sourceA := filepath.Join(root, "a")
+	sourceB := filepath.Join(root, "b")
+	output := filepath.Join(root, "mixed")
+	if err := os.MkdirAll(sourceA, 0o755); err != nil {
+		t.Fatalf("MkdirAll sourceA error: %v", err)
+	}
+	if err := os.MkdirAll(sourceB, 0o755); err != nil {
+		t.Fatalf("MkdirAll sourceB error: %v", err)
+	}
+	if err := writeJSONL(filepath.Join(sourceA, "train.jsonl"), []Example{{Prompt: "1 + 1 = ", Completion: "2", Operation: "add", Level: 1, Template: "equation", AnswerDigits: 1}}); err != nil {
+		t.Fatalf("write sourceA train error: %v", err)
+	}
+	if err := writeJSONL(filepath.Join(sourceA, "val.jsonl"), []Example{{Prompt: "2 + 1 = ", Completion: "3", Operation: "add", Level: 1, Template: "equation", AnswerDigits: 1}}); err != nil {
+		t.Fatalf("write sourceA val error: %v", err)
+	}
+	if err := writeJSONL(filepath.Join(sourceB, "train.jsonl"), []Example{{Prompt: "9 - 8 = ", Completion: "1", Operation: "sub", Level: 2, Template: "equation", AnswerDigits: 1, SmallDifference: true}}); err != nil {
+		t.Fatalf("write sourceB train error: %v", err)
+	}
+	if err := writeJSONL(filepath.Join(sourceB, "val.jsonl"), []Example{{Prompt: "8 - 7 = ", Completion: "1", Operation: "sub", Level: 2, Template: "equation", AnswerDigits: 1, SmallDifference: true}}); err != nil {
+		t.Fatalf("write sourceB val error: %v", err)
+	}
+
+	if err := MixDatasets(output, MixConfig{
+		Sources: []MixSource{
+			{Path: sourceA, Weight: 1},
+			{Path: sourceB, Weight: 2},
+		},
+		Seed: 3,
+	}); err != nil {
+		t.Fatalf("MixDatasets error: %v", err)
+	}
+	train, err := LoadExamples(filepath.Join(output, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples train error: %v", err)
+	}
+	val, err := LoadExamples(filepath.Join(output, "val.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples val error: %v", err)
+	}
+	if len(train) != 3 {
+		t.Fatalf("len(train) = %d, want 3", len(train))
+	}
+	if len(val) != 3 {
+		t.Fatalf("len(val) = %d, want 3", len(val))
+	}
+	subCount := 0
+	for _, example := range train {
+		if example.Operation == "sub" {
+			subCount++
+		}
+	}
+	if subCount != 2 {
+		t.Fatalf("sub train count = %d, want 2", subCount)
 	}
 }
 
