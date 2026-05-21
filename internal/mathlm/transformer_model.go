@@ -59,6 +59,23 @@ type TransformerModel struct {
 	OutputBias         []float64         `json:"output_bias"`
 }
 
+type transformerForwardCache struct {
+	Context   []int
+	X         [][]float64
+	Norm1     [][]float64
+	Q         [][]float64
+	K         [][]float64
+	V         [][]float64
+	AttnProbs [][][]float64
+	Attended  [][]float64
+	Residual1 [][]float64
+	Norm2     [][]float64
+	MLPPre    [][]float64
+	MLPHidden [][]float64
+	MLPOut    [][]float64
+	States    [][]float64
+}
+
 func NewTransformerModel(cfg TransformerConfig) (*TransformerModel, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -153,14 +170,19 @@ func (m *TransformerModel) contextFromInput(input []int) ([]int, error) {
 }
 
 func (m *TransformerModel) forwardContext(context []int) ([][]float64, error) {
+	states, _, err := m.forwardContextWithCache(context)
+	return states, err
+}
+
+func (m *TransformerModel) forwardContextWithCache(context []int) ([][]float64, *transformerForwardCache, error) {
 	if len(context) != m.LMConfig.ContextSize {
-		return nil, fmt.Errorf("context length = %d, want %d", len(context), m.LMConfig.ContextSize)
+		return nil, nil, fmt.Errorf("context length = %d, want %d", len(context), m.LMConfig.ContextSize)
 	}
 	cfg := m.LMConfig
 	x := make([][]float64, cfg.ContextSize)
 	for pos, token := range context {
 		if token < 0 || token >= cfg.VocabSize {
-			return nil, fmt.Errorf("token %d out of range", token)
+			return nil, nil, fmt.Errorf("token %d out of range", token)
 		}
 		x[pos] = make([]float64, cfg.EmbeddingDim)
 		tokenOffset := token * cfg.EmbeddingDim
@@ -184,8 +206,10 @@ func (m *TransformerModel) forwardContext(context []int) ([][]float64, error) {
 	headDim := cfg.EmbeddingDim / cfg.NumHeads
 	scale := 1 / math.Sqrt(float64(headDim))
 	attended := make([][]float64, cfg.ContextSize)
+	attnProbs := make([][][]float64, cfg.ContextSize)
 	for pos := 0; pos < cfg.ContextSize; pos++ {
 		attended[pos] = make([]float64, cfg.EmbeddingDim)
+		attnProbs[pos] = make([][]float64, cfg.NumHeads)
 		for head := 0; head < cfg.NumHeads; head++ {
 			headStart := head * headDim
 			scores := make([]float64, pos+1)
@@ -197,6 +221,7 @@ func (m *TransformerModel) forwardContext(context []int) ([][]float64, error) {
 				scores[src] = dot * scale
 			}
 			probs := softmax(scores)
+			attnProbs[pos][head] = probs
 			for src, prob := range probs {
 				for dim := 0; dim < headDim; dim++ {
 					attended[pos][headStart+dim] += prob * v[src][headStart+dim]
@@ -215,19 +240,44 @@ func (m *TransformerModel) forwardContext(context []int) ([][]float64, error) {
 	}
 
 	states := make([][]float64, cfg.ContextSize)
+	norm2Values := make([][]float64, cfg.ContextSize)
+	mlpPreValues := make([][]float64, cfg.ContextSize)
+	mlpHiddenValues := make([][]float64, cfg.ContextSize)
+	mlpOutValues := make([][]float64, cfg.ContextSize)
 	for pos := range residual1 {
 		norm2 := layerNorm(residual1[pos], m.LN2Gamma, m.LN2Beta)
-		hidden := linearWithBias(norm2, m.MLPInputWeights, m.MLPInputBias, cfg.MLPDim)
-		for i := range hidden {
-			hidden[i] = gelu(hidden[i])
+		hiddenPre := linearWithBias(norm2, m.MLPInputWeights, m.MLPInputBias, cfg.MLPDim)
+		hidden := make([]float64, len(hiddenPre))
+		for i := range hiddenPre {
+			hidden[i] = gelu(hiddenPre[i])
 		}
 		mlpOut := linearWithBias(hidden, m.MLPOutputWeights, m.MLPOutputBias, cfg.EmbeddingDim)
+		norm2Values[pos] = norm2
+		mlpPreValues[pos] = hiddenPre
+		mlpHiddenValues[pos] = hidden
+		mlpOutValues[pos] = mlpOut
 		states[pos] = make([]float64, cfg.EmbeddingDim)
 		for dim := 0; dim < cfg.EmbeddingDim; dim++ {
 			states[pos][dim] = residual1[pos][dim] + mlpOut[dim]
 		}
 	}
-	return states, nil
+	cache := &transformerForwardCache{
+		Context:   append([]int(nil), context...),
+		X:         x,
+		Norm1:     norm1,
+		Q:         q,
+		K:         k,
+		V:         v,
+		AttnProbs: attnProbs,
+		Attended:  attended,
+		Residual1: residual1,
+		Norm2:     norm2Values,
+		MLPPre:    mlpPreValues,
+		MLPHidden: mlpHiddenValues,
+		MLPOut:    mlpOutValues,
+		States:    states,
+	}
+	return states, cache, nil
 }
 
 func (m *TransformerModel) logitsForState(state []float64) []float64 {
@@ -283,4 +333,11 @@ func layerNorm(input, gamma, beta []float64) []float64 {
 
 func gelu(value float64) float64 {
 	return 0.5 * value * (1 + math.Tanh(math.Sqrt(2/math.Pi)*(value+0.044715*value*value*value)))
+}
+
+func geluDerivative(value float64) float64 {
+	inner := math.Sqrt(2/math.Pi) * (value + 0.044715*value*value*value)
+	tanhInner := math.Tanh(inner)
+	innerDerivative := math.Sqrt(2/math.Pi) * (1 + 3*0.044715*value*value)
+	return 0.5*(1+tanhInner) + 0.5*value*(1-tanhInner*tanhInner)*innerDerivative
 }

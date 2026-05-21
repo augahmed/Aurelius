@@ -103,6 +103,56 @@ func TestTransformerTrainingReducesLoss(t *testing.T) {
 	}
 }
 
+func TestTransformerTrainingUpdatesBlockWeights(t *testing.T) {
+	model, err := NewTransformerModel(TransformerConfig{
+		VocabSize:    256,
+		ContextSize:  8,
+		EmbeddingDim: 16,
+		NumHeads:     2,
+		MLPDim:       32,
+		Seed:         13,
+	})
+	if err != nil {
+		t.Fatalf("NewTransformerModel error: %v", err)
+	}
+	trainer, err := NewTransformerTrainer(model)
+	if err != nil {
+		t.Fatalf("NewTransformerTrainer error: %v", err)
+	}
+	originalTokenEmbedding := append([]float64(nil), model.TokenEmbeddings...)
+	originalQueryWeights := append([]float64(nil), model.QueryWeights...)
+	originalMLPInputWeights := append([]float64(nil), model.MLPInputWeights...)
+
+	examples := []arithmetic.Example{
+		{Prompt: "2 + 2 = ", Completion: "4", Operation: "add", Level: 1},
+		{Prompt: "5 - 2 = ", Completion: "3", Operation: "sub", Level: 1},
+	}
+	sequences, err := arithmetic.BuildTrainingSequences(examples, byteTok(), 8)
+	if err != nil {
+		t.Fatalf("BuildTrainingSequences error: %v", err)
+	}
+	if _, err := trainer.Train(sequences, sequences, TrainingConfig{
+		Epochs:       5,
+		BatchSize:    4,
+		LearningRate: 0.01,
+		Beta1:        0.9,
+		Beta2:        0.999,
+		Epsilon:      1e-8,
+		Seed:         14,
+	}); err != nil {
+		t.Fatalf("Train error: %v", err)
+	}
+	if slicesEqual(originalTokenEmbedding, model.TokenEmbeddings) {
+		t.Fatal("token embeddings did not change")
+	}
+	if slicesEqual(originalQueryWeights, model.QueryWeights) {
+		t.Fatal("query weights did not change")
+	}
+	if slicesEqual(originalMLPInputWeights, model.MLPInputWeights) {
+		t.Fatal("MLP input weights did not change")
+	}
+}
+
 func TestTransformerCheckpointRoundTrip(t *testing.T) {
 	model, err := NewTransformerModel(TransformerConfig{
 		VocabSize:    256,
@@ -147,4 +197,16 @@ func TestTransformerCheckpointRoundTrip(t *testing.T) {
 			t.Fatalf("logit[%d] = %f, want %f", i, logitsB[i], logitsA[i])
 		}
 	}
+}
+
+func slicesEqual(left, right []float64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }

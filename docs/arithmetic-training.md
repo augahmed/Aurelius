@@ -122,9 +122,9 @@ go run ./cmd/aurelius train-math \
   -embedding-dim 32 \
   -hidden-dim 128 \
   -num-heads 4 \
-  -epochs 10 \
-  -batch-size 64 \
-  -learning-rate 0.01
+  -epochs 25 \
+  -batch-size 32 \
+  -learning-rate 0.003
 ```
 
 ## Evaluation
@@ -193,12 +193,13 @@ The arithmetic trainer supports two backends:
 - MLP block with GELU
 - output projection to next-token logits
 
-The transformer backend is currently a forward-path and checkpointing milestone. It trains only the LM head over fixed transformer features, so it is useful for validating architecture, checkpoint loading, and CLI integration, but it is not yet the full backprop-through-transformer trainer needed for serious arithmetic improvement.
+The transformer backend now backpropagates through the full one-block path: embeddings, positional embeddings, layer norms, Q/K/V attention weights, attention output projection, MLP weights, and output head. It is still a small educational CPU implementation rather than an optimized training stack.
 
 ## Limitations
 
 - byte-level tokenization is simple, not efficient
-- the transformer backend does not yet backpropagate through embeddings, attention, layer norms, or MLP block weights
+- the transformer backend is only one decoder block and trains slowly on CPU
+- the transformer implementation favors readable manual gradients over speed or memory efficiency
 - arithmetic quality depends heavily on operand range and dataset size
 - exact-match accuracy is useful for arithmetic but not a general language-model benchmark
 - the current training loop is CPU-first and educational rather than optimized

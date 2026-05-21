@@ -114,7 +114,7 @@ Aurelius now includes a student-scale from-scratch training path for arithmetic.
 - synthetic arithmetic JSONL datasets with curriculum metadata
 - the existing byte tokenizer for a minimal training-first path
 - `train-math -model mlp` for the original fixed-context autoregressive MLP language model
-- `train-math -model transformer` for a one-layer causal decoder transformer forward path with LM-head training
+- `train-math -model transformer` for a one-layer causal decoder transformer with manual full-path backpropagation
 - JSON checkpoints for save/resume
 - exact-match evaluation on held-out arithmetic prompts, grouped by operation and curriculum level
 
@@ -126,7 +126,7 @@ Curriculum levels let you scale data difficulty without changing the model first
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l1 -operations add,sub -levels 1
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l1-l3 -operations add,sub -levels 1,2,3
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-word -operations word -levels 6
-go run ./cmd/aurelius train-math -model transformer -data-dir ./data/arithmetic-l1 -checkpoint ./artifacts/math-transformer-l1.json -num-heads 4
+go run ./cmd/aurelius train-math -model transformer -data-dir ./data/arithmetic-l1 -checkpoint ./artifacts/math-transformer-l1.json -num-heads 4 -epochs 25 -batch-size 32 -learning-rate 0.003
 ```
 
 ## Development Commands

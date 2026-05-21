@@ -162,9 +162,7 @@ func LoadAnyCheckpoint(path string) (*AnyTrainer, error) {
 		if err := checkpoint.Transformer.Model.LMConfig.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid checkpoint transformer config: %w", err)
 		}
-		if checkpoint.Transformer.Adam == nil {
-			checkpoint.Transformer.Adam = newTransformerOptimizerState(checkpoint.Transformer.Model)
-		}
+		checkpoint.Transformer.Adam = ensureTransformerOptimizerState(checkpoint.Transformer.Model, checkpoint.Transformer.Adam)
 		return NewTransformerAnyTrainer(checkpoint.Transformer)
 	default:
 		return nil, fmt.Errorf("unsupported model type %q", modelType)

@@ -100,7 +100,7 @@ The current training path is intentionally narrower than the GPT-2 inference sta
 - training examples are left-padded fixed-context windows that use the prompt as context and optimize only completion/newline targets
 - `train-math -model mlp` uses the original small autoregressive MLP language model
 - `train-math -model transformer` uses a one-layer causal decoder block with token embeddings, positional embeddings, layer norms, self-attention, an MLP block, residual connections, and an LM head
-- the first transformer training slice updates only the LM head over fixed transformer features; full backpropagation through attention and MLP weights remains a future milestone
+- transformer training uses manual backpropagation through embeddings, positional embeddings, layer norms, Q/K/V attention weights, attention projection, MLP block, and LM head
 - checkpoints serialize model type, model weights, and optimizer state as JSON for easy inspection and resume
 - evaluation reports exact-match accuracy overall, by operation, and by curriculum level
 
