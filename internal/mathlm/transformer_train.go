@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"time"
 
 	"github.com/augahmed/aurelius/internal/arithmetic"
 )
@@ -96,12 +97,17 @@ func (t *TransformerTrainer) Train(train, val []arithmetic.SequenceExample, cfg 
 		indices[i] = i
 	}
 
-	report := TrainingReport{}
-	for epoch := 0; epoch < cfg.Epochs; epoch++ {
+	startStep := t.Step
+	started := time.Now()
+	report := TrainingReport{Steps: t.Step}
+	for epoch := 0; epoch < cfg.Epochs && !reachedMaxSteps(cfg, t.Step, startStep); epoch++ {
 		rng.Shuffle(len(indices), func(i, j int) {
 			indices[i], indices[j] = indices[j], indices[i]
 		})
 		for start := 0; start < len(indices); start += cfg.BatchSize {
+			if reachedMaxSteps(cfg, t.Step, startStep) {
+				break
+			}
 			end := min(len(indices), start+cfg.BatchSize)
 			batch := make([]arithmetic.SequenceExample, end-start)
 			for i := range batch {
@@ -113,14 +119,22 @@ func (t *TransformerTrainer) Train(train, val []arithmetic.SequenceExample, cfg 
 			}
 			report.TrainLoss = loss
 			report.Steps = t.Step
+			if err := maybeReportProgress(cfg, t.Step, startStep, loss, started); err != nil {
+				return TrainingReport{}, err
+			}
+			if err := maybeSaveCheckpoint(cfg, t.Step, startStep); err != nil {
+				return TrainingReport{}, err
+			}
 		}
 	}
 
-	trainLoss, err := AverageTransformerLoss(t.Model, train)
-	if err != nil {
-		return TrainingReport{}, err
+	if cfg.MaxSteps == 0 {
+		trainLoss, err := AverageTransformerLoss(t.Model, train)
+		if err != nil {
+			return TrainingReport{}, err
+		}
+		report.TrainLoss = trainLoss
 	}
-	report.TrainLoss = trainLoss
 	if len(val) > 0 {
 		valLoss, err := AverageTransformerLoss(t.Model, val)
 		if err != nil {
@@ -163,6 +177,7 @@ func (t *TransformerTrainer) trainBatch(batch []arithmetic.SequenceExample, cfg 
 
 	scale := 1 / float64(len(batch))
 	grads.scale(scale)
+	grads.clip(cfg.GradClip)
 
 	t.Step++
 	t.applyGradients(grads, cfg)
@@ -392,6 +407,27 @@ func (g *transformerGradients) scale(scale float64) {
 	scaleSlice(g.MLPOutputBias, scale)
 	scaleSlice(g.OutputWeights, scale)
 	scaleSlice(g.OutputBias, scale)
+}
+
+func (g *transformerGradients) clip(maxNorm float64) {
+	clipGradientSlices(maxNorm,
+		g.TokenEmbeddings,
+		g.PositionEmbeddings,
+		g.LN1Gamma,
+		g.LN1Beta,
+		g.QueryWeights,
+		g.KeyWeights,
+		g.ValueWeights,
+		g.AttentionWeights,
+		g.LN2Gamma,
+		g.LN2Beta,
+		g.MLPInputWeights,
+		g.MLPInputBias,
+		g.MLPOutputWeights,
+		g.MLPOutputBias,
+		g.OutputWeights,
+		g.OutputBias,
+	)
 }
 
 func (t *TransformerTrainer) applyGradients(grads *transformerGradients, cfg TrainingConfig) {

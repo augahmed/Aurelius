@@ -421,6 +421,90 @@ func TestRunMixMathData(t *testing.T) {
 	}
 }
 
+func TestRunTrainMathWithTrainingControls(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	checkpointPath := filepath.Join(root, "math-transformer.json")
+	if err := arithmetic.GenerateDataset(dataDir, arithmetic.GenerateConfig{
+		TrainCount: 4,
+		ValCount:   2,
+		Operations: []string{"add"},
+		Levels:     []int{1},
+		Templates:  []string{"equation"},
+		MinOperand: 0,
+		MaxOperand: 9,
+		Seed:       31,
+	}); err != nil {
+		t.Fatalf("GenerateDataset error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"train-math",
+		"-model", "transformer",
+		"-data-dir", dataDir,
+		"-checkpoint", checkpointPath,
+		"-context-size", "8",
+		"-embedding-dim", "8",
+		"-hidden-dim", "16",
+		"-num-heads", "2",
+		"-epochs", "10",
+		"-batch-size", "2",
+		"-learning-rate", "0.01",
+		"-max-steps", "1",
+		"-log-every", "1",
+		"-save-every", "1",
+		"-grad-clip", "1",
+		"-seed", "32",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "step=1 train_loss=") {
+		t.Fatalf("stdout = %q, want progress line", output)
+	}
+	if !strings.Contains(output, "checkpoint_step=1 path=") {
+		t.Fatalf("stdout = %q, want periodic checkpoint line", output)
+	}
+	if _, err := os.Stat(periodicCheckpointPath(checkpointPath, 1)); err != nil {
+		t.Fatalf("periodic checkpoint missing: %v", err)
+	}
+	loaded, err := mathlm.LoadAnyCheckpoint(checkpointPath)
+	if err != nil {
+		t.Fatalf("LoadAnyCheckpoint final error: %v", err)
+	}
+	if loaded.ModelType != "transformer" || loaded.Transformer.Step != 1 {
+		t.Fatalf("loaded checkpoint type=%q step=%d, want transformer step 1", loaded.ModelType, loaded.Transformer.Step)
+	}
+
+	var resumeStdout bytes.Buffer
+	var resumeStderr bytes.Buffer
+	code = run([]string{
+		"train-math",
+		"-model", "transformer",
+		"-data-dir", dataDir,
+		"-checkpoint", checkpointPath,
+		"-resume", checkpointPath,
+		"-epochs", "10",
+		"-batch-size", "2",
+		"-learning-rate", "0.01",
+		"-max-steps", "1",
+		"-seed", "33",
+	}, &resumeStdout, &resumeStderr)
+	if code != 0 {
+		t.Fatalf("resume run() exit code = %d, stderr = %q", code, resumeStderr.String())
+	}
+	resumed, err := mathlm.LoadAnyCheckpoint(checkpointPath)
+	if err != nil {
+		t.Fatalf("LoadAnyCheckpoint resumed error: %v", err)
+	}
+	if resumed.Transformer.Step != 2 {
+		t.Fatalf("resumed transformer step = %d, want 2", resumed.Transformer.Step)
+	}
+}
+
 type gpt2TestAssets struct {
 	vocabPath   string
 	mergesPath  string

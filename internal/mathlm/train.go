@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"time"
 
 	"github.com/augahmed/aurelius/internal/arithmetic"
 )
@@ -16,12 +17,25 @@ type TrainingConfig struct {
 	Beta2        float64
 	Epsilon      float64
 	Seed         int64
+	MaxSteps     int
+	LogEvery     int
+	SaveEvery    int
+	GradClip     float64
+	OnProgress   func(TrainingProgress) error
+	OnCheckpoint func(step int) error
 }
 
 type TrainingReport struct {
 	TrainLoss float64
 	ValLoss   float64
 	Steps     int
+}
+
+type TrainingProgress struct {
+	Step           int
+	Loss           float64
+	Elapsed        time.Duration
+	StepsPerSecond float64
 }
 
 type Trainer struct {
@@ -84,6 +98,18 @@ func (c TrainingConfig) Validate() error {
 	if c.Epsilon <= 0 {
 		return fmt.Errorf("epsilon must be positive")
 	}
+	if c.MaxSteps < 0 {
+		return fmt.Errorf("max steps cannot be negative")
+	}
+	if c.LogEvery < 0 {
+		return fmt.Errorf("log every cannot be negative")
+	}
+	if c.SaveEvery < 0 {
+		return fmt.Errorf("save every cannot be negative")
+	}
+	if c.GradClip < 0 {
+		return fmt.Errorf("grad clip cannot be negative")
+	}
 	return nil
 }
 
@@ -104,12 +130,17 @@ func (t *Trainer) Train(train, val []arithmetic.SequenceExample, cfg TrainingCon
 		indices[i] = i
 	}
 
-	report := TrainingReport{}
-	for epoch := 0; epoch < cfg.Epochs; epoch++ {
+	startStep := t.Step
+	started := time.Now()
+	report := TrainingReport{Steps: t.Step}
+	for epoch := 0; epoch < cfg.Epochs && !reachedMaxSteps(cfg, t.Step, startStep); epoch++ {
 		rng.Shuffle(len(indices), func(i, j int) {
 			indices[i], indices[j] = indices[j], indices[i]
 		})
 		for start := 0; start < len(indices); start += cfg.BatchSize {
+			if reachedMaxSteps(cfg, t.Step, startStep) {
+				break
+			}
 			end := min(len(indices), start+cfg.BatchSize)
 			batch := make([]arithmetic.SequenceExample, end-start)
 			for i := range batch {
@@ -121,14 +152,22 @@ func (t *Trainer) Train(train, val []arithmetic.SequenceExample, cfg TrainingCon
 			}
 			report.TrainLoss = loss
 			report.Steps = t.Step
+			if err := maybeReportProgress(cfg, t.Step, startStep, loss, started); err != nil {
+				return TrainingReport{}, err
+			}
+			if err := maybeSaveCheckpoint(cfg, t.Step, startStep); err != nil {
+				return TrainingReport{}, err
+			}
 		}
 	}
 
-	trainLoss, err := AverageLoss(t.Model, train)
-	if err != nil {
-		return TrainingReport{}, err
+	if cfg.MaxSteps == 0 {
+		trainLoss, err := AverageLoss(t.Model, train)
+		if err != nil {
+			return TrainingReport{}, err
+		}
+		report.TrainLoss = trainLoss
 	}
-	report.TrainLoss = trainLoss
 	if len(val) > 0 {
 		valLoss, err := AverageLoss(t.Model, val)
 		if err != nil {
@@ -175,6 +214,7 @@ func (t *Trainer) trainBatch(batch []arithmetic.SequenceExample, cfg TrainingCon
 	scaleSlice(grads.HiddenBias, scale)
 	scaleSlice(grads.OutputWeights, scale)
 	scaleSlice(grads.OutputBias, scale)
+	clipGradientSlices(cfg.GradClip, grads.Embeddings, grads.HiddenWeights, grads.HiddenBias, grads.OutputWeights, grads.OutputBias)
 
 	t.Step++
 	applyAdam(t.Model.Embeddings, grads.Embeddings, t.Adam.EmbeddingsM, t.Adam.EmbeddingsV, t.Step, cfg)
@@ -318,6 +358,55 @@ func scaleSlice(values []float64, scale float64) {
 	for i := range values {
 		values[i] *= scale
 	}
+}
+
+func clipGradientSlices(maxNorm float64, slices ...[]float64) {
+	if maxNorm <= 0 {
+		return
+	}
+	sumSquares := 0.0
+	for _, values := range slices {
+		for _, value := range values {
+			sumSquares += value * value
+		}
+	}
+	norm := math.Sqrt(sumSquares)
+	if norm == 0 || norm <= maxNorm {
+		return
+	}
+	scale := maxNorm / norm
+	for _, values := range slices {
+		scaleSlice(values, scale)
+	}
+}
+
+func reachedMaxSteps(cfg TrainingConfig, currentStep, startStep int) bool {
+	return cfg.MaxSteps > 0 && currentStep-startStep >= cfg.MaxSteps
+}
+
+func maybeReportProgress(cfg TrainingConfig, step, startStep int, loss float64, started time.Time) error {
+	stepsThisRun := step - startStep
+	if cfg.LogEvery <= 0 || cfg.OnProgress == nil || stepsThisRun%cfg.LogEvery != 0 {
+		return nil
+	}
+	elapsed := time.Since(started)
+	stepsPerSecond := 0.0
+	if elapsed > 0 {
+		stepsPerSecond = float64(stepsThisRun) / elapsed.Seconds()
+	}
+	return cfg.OnProgress(TrainingProgress{
+		Step:           step,
+		Loss:           loss,
+		Elapsed:        elapsed,
+		StepsPerSecond: stepsPerSecond,
+	})
+}
+
+func maybeSaveCheckpoint(cfg TrainingConfig, step, startStep int) error {
+	if cfg.SaveEvery <= 0 || cfg.OnCheckpoint == nil || (step-startStep)%cfg.SaveEvery != 0 {
+		return nil
+	}
+	return cfg.OnCheckpoint(step)
 }
 
 func maxFloat(left, right float64) float64 {

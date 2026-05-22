@@ -60,6 +60,19 @@ go run ./cmd/aurelius gen-math-data \
   -seed 7
 ```
 
+Generate question-template examples when the model underperforms on `What is ...?` prompts:
+
+```bash
+go run ./cmd/aurelius gen-math-data \
+  -output-dir ./data/arithmetic-l2-question \
+  -train-count 10000 \
+  -val-count 1000 \
+  -operations add,sub \
+  -levels 2 \
+  -templates question \
+  -seed 8
+```
+
 Mix normal and targeted datasets for replay training:
 
 ```bash
@@ -70,6 +83,28 @@ go run ./cmd/aurelius mix-math-data \
 ```
 
 `mix-math-data` expects each input to be a generated dataset directory containing `train.jsonl` and `val.jsonl`. Integer weights repeat a source before deterministic shuffling, so `targeted:2` contributes twice as many examples as `targeted:1`. The output is a normal dataset directory that works with `train-math` and `eval-math`.
+
+Create a question-heavy replay mix:
+
+```bash
+go run ./cmd/aurelius mix-math-data \
+  -output-dir ./data/arithmetic-l2-question-replay \
+  -inputs ./data/arithmetic-l2-replay:1,./data/arithmetic-l2-question:2 \
+  -seed 2
+```
+
+Prepare level 3 carry/borrow data:
+
+```bash
+go run ./cmd/aurelius gen-math-data \
+  -output-dir ./data/arithmetic-l3-transformer \
+  -train-count 10000 \
+  -val-count 1000 \
+  -operations add,sub \
+  -levels 3 \
+  -templates all \
+  -seed 61
+```
 
 ## Training Workflow
 
@@ -84,6 +119,7 @@ go run ./cmd/aurelius gen-math-data \
   -max-operand 20 \
   -operations add,sub,mul,div \
   -levels 1,2,3,4,5 \
+  -templates all \
   -seed 1
 ```
 
@@ -150,6 +186,45 @@ go run ./cmd/aurelius train-math \
   -epochs 25 \
   -batch-size 32 \
   -learning-rate 0.003
+```
+
+For larger curriculum training, use bounded runs with progress and checkpoint controls:
+
+```bash
+go run ./cmd/aurelius train-math \
+  -model transformer \
+  -data-dir ./data/arithmetic-l1-l3 \
+  -checkpoint ./artifacts/math-transformer-curriculum.json \
+  -context-size 32 \
+  -embedding-dim 32 \
+  -hidden-dim 128 \
+  -num-heads 4 \
+  -epochs 50 \
+  -batch-size 32 \
+  -learning-rate 0.003 \
+  -max-steps 2000 \
+  -log-every 100 \
+  -save-every 1000 \
+  -grad-clip 1
+```
+
+`-max-steps` limits optimizer updates for the current invocation, which makes long jobs easier to run in chunks. When `-max-steps` is set, the final `train_loss` is the latest batch loss instead of a full training-set pass, so short smoke runs do not waste time rescoring the whole dataset. `-log-every` prints `step`, current batch loss, elapsed time, and steps/sec. `-save-every` writes periodic checkpoints next to the final checkpoint using names such as `math-transformer-curriculum-step1000.json`. `-grad-clip` clips gradients by global norm before Adam; `1` is a practical starting value for transformer runs.
+
+Resume a transformer checkpoint with the same command shape:
+
+```bash
+go run ./cmd/aurelius train-math \
+  -model transformer \
+  -data-dir ./data/arithmetic-l1-l3 \
+  -checkpoint ./artifacts/math-transformer-curriculum.json \
+  -resume ./artifacts/math-transformer-curriculum.json \
+  -epochs 50 \
+  -batch-size 32 \
+  -learning-rate 0.003 \
+  -max-steps 2000 \
+  -log-every 100 \
+  -save-every 1000 \
+  -grad-clip 1
 ```
 
 ## Evaluation

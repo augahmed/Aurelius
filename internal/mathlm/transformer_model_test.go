@@ -199,6 +199,73 @@ func TestTransformerCheckpointRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTransformerCheckpointResumeContinuesStep(t *testing.T) {
+	model, err := NewTransformerModel(TransformerConfig{
+		VocabSize:    256,
+		ContextSize:  8,
+		EmbeddingDim: 8,
+		NumHeads:     2,
+		MLPDim:       16,
+		Seed:         24,
+	})
+	if err != nil {
+		t.Fatalf("NewTransformerModel error: %v", err)
+	}
+	trainer, err := NewTransformerTrainer(model)
+	if err != nil {
+		t.Fatalf("NewTransformerTrainer error: %v", err)
+	}
+	examples := []arithmetic.Example{
+		{Prompt: "2 + 2 = ", Completion: "4", Operation: "add", Level: 1},
+		{Prompt: "5 - 2 = ", Completion: "3", Operation: "sub", Level: 1},
+	}
+	sequences, err := arithmetic.BuildTrainingSequences(examples, byteTok(), 8)
+	if err != nil {
+		t.Fatalf("BuildTrainingSequences error: %v", err)
+	}
+	if _, err := trainer.Train(sequences, sequences, TrainingConfig{
+		Epochs:       5,
+		BatchSize:    1,
+		LearningRate: 0.01,
+		Beta1:        0.9,
+		Beta2:        0.999,
+		Epsilon:      1e-8,
+		Seed:         25,
+		MaxSteps:     2,
+		GradClip:     1,
+	}); err != nil {
+		t.Fatalf("Train error: %v", err)
+	}
+	anyTrainer, err := NewTransformerAnyTrainer(trainer)
+	if err != nil {
+		t.Fatalf("NewTransformerAnyTrainer error: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "transformer-checkpoint.json")
+	if err := SaveAnyCheckpoint(path, anyTrainer); err != nil {
+		t.Fatalf("SaveAnyCheckpoint error: %v", err)
+	}
+	loaded, err := LoadAnyCheckpoint(path)
+	if err != nil {
+		t.Fatalf("LoadAnyCheckpoint error: %v", err)
+	}
+	report, err := loaded.Train(sequences, sequences, TrainingConfig{
+		Epochs:       5,
+		BatchSize:    1,
+		LearningRate: 0.01,
+		Beta1:        0.9,
+		Beta2:        0.999,
+		Epsilon:      1e-8,
+		Seed:         26,
+		MaxSteps:     1,
+	})
+	if err != nil {
+		t.Fatalf("Train resumed error: %v", err)
+	}
+	if report.Steps != 3 || loaded.Transformer.Step != 3 {
+		t.Fatalf("resumed steps = report %d trainer %d, want 3", report.Steps, loaded.Transformer.Step)
+	}
+}
+
 func slicesEqual(left, right []float64) bool {
 	if len(left) != len(right) {
 		return false

@@ -78,6 +78,60 @@ func TestTrainingReducesLoss(t *testing.T) {
 	}
 }
 
+func TestTrainingControlsMaxStepsAndProgress(t *testing.T) {
+	model, err := NewModel(Config{
+		VocabSize:    256,
+		ContextSize:  8,
+		EmbeddingDim: 8,
+		HiddenDim:    16,
+		Seed:         22,
+	})
+	if err != nil {
+		t.Fatalf("NewModel error: %v", err)
+	}
+	trainer, err := NewTrainer(model)
+	if err != nil {
+		t.Fatalf("NewTrainer error: %v", err)
+	}
+	examples := []arithmetic.Example{
+		{Prompt: "2 + 2 = ", Completion: "4", Operation: "add", Level: 1},
+		{Prompt: "5 - 2 = ", Completion: "3", Operation: "sub", Level: 1},
+	}
+	sequences, err := arithmetic.BuildTrainingSequences(examples, byteTok(), 8)
+	if err != nil {
+		t.Fatalf("BuildTrainingSequences error: %v", err)
+	}
+	progressSteps := []int{}
+	report, err := trainer.Train(sequences, sequences, TrainingConfig{
+		Epochs:       20,
+		BatchSize:    1,
+		LearningRate: 0.01,
+		Beta1:        0.9,
+		Beta2:        0.999,
+		Epsilon:      1e-8,
+		Seed:         23,
+		MaxSteps:     3,
+		LogEvery:     1,
+		GradClip:     0.5,
+		OnProgress: func(progress TrainingProgress) error {
+			progressSteps = append(progressSteps, progress.Step)
+			if progress.StepsPerSecond <= 0 {
+				t.Fatalf("steps/sec = %f, want positive", progress.StepsPerSecond)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Train error: %v", err)
+	}
+	if report.Steps != 3 || trainer.Step != 3 {
+		t.Fatalf("steps = report %d trainer %d, want 3", report.Steps, trainer.Step)
+	}
+	if len(progressSteps) != 3 {
+		t.Fatalf("progress callback count = %d, want 3", len(progressSteps))
+	}
+}
+
 func TestCheckpointRoundTrip(t *testing.T) {
 	model, err := NewModel(Config{
 		VocabSize:    256,

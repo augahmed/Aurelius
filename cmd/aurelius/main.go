@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/augahmed/aurelius/internal/arithmetic"
 	"github.com/augahmed/aurelius/internal/gpt2"
@@ -111,6 +112,7 @@ func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int 
 	maxOperand := flags.Int("max-operand", 20, "maximum operand value")
 	operations := flags.String("operations", "add,sub,mul,div", "comma-separated operations: add,sub,mul,div,word")
 	levels := flags.String("levels", "1,2,3,4,5", "comma-separated curriculum levels: 1,2,3,4,5,6")
+	templates := flags.String("templates", "all", "comma-separated templates: equation,question,solve, or all")
 	answerDigits := flags.String("answer-digits", "", "optional comma-separated answer digit buckets, for example 1,2")
 	smallDifferenceOnly := flags.Bool("small-difference-only", false, "only generate subtraction examples with one-digit differences")
 	seed := flags.Int64("seed", 1, "random seed")
@@ -134,6 +136,10 @@ func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "parse answer-digits: %v\n", err)
 		return 1
 	}
+	parsedTemplates := splitCSV(*templates)
+	if len(parsedTemplates) == 1 && parsedTemplates[0] == "all" {
+		parsedTemplates = nil
+	}
 
 	cfg := arithmetic.GenerateConfig{
 		TrainCount:          *trainCount,
@@ -142,6 +148,7 @@ func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int 
 		MaxOperand:          *maxOperand,
 		Operations:          splitCSV(*operations),
 		Levels:              parsedLevels,
+		Templates:           parsedTemplates,
 		AnswerDigits:        parsedAnswerDigits,
 		SmallDifferenceOnly: *smallDifferenceOnly,
 		Seed:                *seed,
@@ -201,6 +208,10 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	epochs := flags.Int("epochs", 10, "number of training epochs")
 	batchSize := flags.Int("batch-size", 64, "batch size")
 	learningRate := flags.Float64("learning-rate", 0.01, "optimizer learning rate")
+	maxSteps := flags.Int("max-steps", 0, "optional maximum optimizer steps for this run; 0 disables")
+	logEvery := flags.Int("log-every", 0, "print training progress every N optimizer steps; 0 disables")
+	saveEvery := flags.Int("save-every", 0, "write periodic checkpoints every N optimizer steps; 0 disables")
+	gradClip := flags.Float64("grad-clip", 0, "clip gradients by global norm before Adam; 0 disables")
 	seed := flags.Int64("seed", 1, "random seed")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "parse flags: %v\n", err)
@@ -211,6 +222,12 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		flags.Usage()
 		return 1
 	}
+	contextSizeSet := false
+	flags.Visit(func(flag *flag.Flag) {
+		if flag.Name == "context-size" {
+			contextSizeSet = true
+		}
+	})
 
 	trainExamples, valExamples, err := loadArithmeticDatasets(*dataDir)
 	if err != nil {
@@ -218,17 +235,6 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	tok := tokenizer.NewByteTokenizer()
-	trainSeq, err := arithmetic.BuildTrainingSequences(trainExamples, tok, *contextSize)
-	if err != nil {
-		fmt.Fprintf(stderr, "build train sequences: %v\n", err)
-		return 1
-	}
-	valSeq, err := arithmetic.BuildTrainingSequences(valExamples, tok, *contextSize)
-	if err != nil {
-		fmt.Fprintf(stderr, "build val sequences: %v\n", err)
-		return 1
-	}
-
 	trainer, err := loadOrCreateAnyMathTrainer(*resumePath, *modelType, mathlm.Config{
 		VocabSize:    tok.VocabSize(),
 		ContextSize:  *contextSize,
@@ -247,6 +253,25 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "load trainer: %v\n", err)
 		return 1
 	}
+	trainingContextSize := *contextSize
+	if *resumePath != "" {
+		modelConfig := trainer.Model().Config()
+		if contextSizeSet && *contextSize != modelConfig.ContextLength {
+			fmt.Fprintf(stderr, "context-size %d does not match resumed checkpoint context size %d\n", *contextSize, modelConfig.ContextLength)
+			return 1
+		}
+		trainingContextSize = modelConfig.ContextLength
+	}
+	trainSeq, err := arithmetic.BuildTrainingSequences(trainExamples, tok, trainingContextSize)
+	if err != nil {
+		fmt.Fprintf(stderr, "build train sequences: %v\n", err)
+		return 1
+	}
+	valSeq, err := arithmetic.BuildTrainingSequences(valExamples, tok, trainingContextSize)
+	if err != nil {
+		fmt.Fprintf(stderr, "build val sequences: %v\n", err)
+		return 1
+	}
 
 	before, err := mathlm.EvaluateExamples(trainer.Model(), valExamples, maxCompletionTokens(valExamples))
 	if err != nil {
@@ -261,6 +286,27 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		Beta2:        0.999,
 		Epsilon:      1e-8,
 		Seed:         *seed,
+		MaxSteps:     *maxSteps,
+		LogEvery:     *logEvery,
+		SaveEvery:    *saveEvery,
+		GradClip:     *gradClip,
+		OnProgress: func(progress mathlm.TrainingProgress) error {
+			fmt.Fprintf(stdout, "step=%d train_loss=%.4f elapsed=%s steps_per_sec=%.2f\n",
+				progress.Step,
+				progress.Loss,
+				progress.Elapsed.Truncate(time.Millisecond),
+				progress.StepsPerSecond,
+			)
+			return nil
+		},
+		OnCheckpoint: func(step int) error {
+			path := periodicCheckpointPath(*checkpointPath, step)
+			if err := mathlm.SaveAnyCheckpoint(path, trainer); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "checkpoint_step=%d path=%s\n", step, path)
+			return nil
+		},
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "train model: %v\n", err)
@@ -1045,6 +1091,15 @@ func writeEvalErrorsFile(path string, report mathlm.EvalReport) error {
 		return fmt.Errorf("write eval errors file: %w", err)
 	}
 	return nil
+}
+
+func periodicCheckpointPath(basePath string, step int) string {
+	ext := filepath.Ext(basePath)
+	stem := strings.TrimSuffix(basePath, ext)
+	if ext == "" {
+		return fmt.Sprintf("%s-step%d", basePath, step)
+	}
+	return fmt.Sprintf("%s-step%d%s", stem, step, ext)
 }
 
 func sortedStringKeys[V any](values map[string]V) []string {
