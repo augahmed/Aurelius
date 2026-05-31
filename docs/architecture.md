@@ -96,15 +96,16 @@ The current training path is intentionally narrower than the GPT-2 inference sta
 
 - dataset generation writes JSONL records with `prompt`, `completion`, operation, level, operand-range, template, and carry/borrow metadata
 - arithmetic examples also include answer-shape metadata such as answer digit count and small-difference subtraction labels
+- worked-solution examples keep `completion` as the full reasoning trace and `answer` as the final value, so training can learn digit steps while evaluation scores only the final answer
 - curriculum generation balances compatible level/operation pairs so train and validation splits preserve coverage for grouped evaluation
 - template filtering can generate equation, question, solve, or mixed prompt formats for targeted replay
 - replay mixing combines generated dataset directories with integer weights, then shuffles into a standard train/validation dataset
 - tokenization reuses the byte tokenizer so the first end-to-end training loop stays simple
 - training examples are left-padded fixed-context windows that use the prompt as context and optimize only completion/newline targets
 - `train-math -model mlp` uses the original small autoregressive MLP language model
-- `train-math -model transformer` uses a one-layer causal decoder block with token embeddings, positional embeddings, layer norms, self-attention, an MLP block, residual connections, and an LM head
-- transformer training uses manual backpropagation through embeddings, positional embeddings, layer norms, Q/K/V attention weights, attention projection, MLP block, and LM head
-- training controls are shared by both math backends: `-max-steps` bounds the current run, `-log-every` reports progress, `-save-every` writes periodic checkpoints, and `-grad-clip` applies global-norm clipping before Adam updates
+- `train-math -model transformer` uses configurable causal decoder blocks with token embeddings, positional embeddings, layer norms, self-attention, MLP blocks, residual connections, a final layer norm, and an LM head
+- transformer training uses manual backpropagation through embeddings, positional embeddings, each layer's layer norms, Q/K/V attention weights, attention projection, MLP block, final layer norm, and LM head
+- training controls are shared by both math backends: `-max-steps` bounds the current run, `-log-every` reports progress, `-save-every` writes periodic checkpoints, `-grad-clip` applies global-norm clipping before Adam updates, and optional warmup/decay controls adjust learning rate over global optimizer steps
 - checkpoints serialize model type, model weights, and optimizer state as JSON for easy inspection and resume
 - evaluation reports exact-match accuracy overall, by operation, and by curriculum level
 - optional evaluation debugging records incorrect examples and grouped template counts without changing default eval output

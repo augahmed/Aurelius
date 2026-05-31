@@ -10,19 +10,24 @@ import (
 )
 
 type TrainingConfig struct {
-	Epochs       int
-	BatchSize    int
-	LearningRate float64
-	Beta1        float64
-	Beta2        float64
-	Epsilon      float64
-	Seed         int64
-	MaxSteps     int
-	LogEvery     int
-	SaveEvery    int
-	GradClip     float64
-	OnProgress   func(TrainingProgress) error
-	OnCheckpoint func(step int) error
+	Epochs             int
+	BatchSize          int
+	LearningRate       float64
+	WarmupSteps        int
+	DecaySteps         int
+	MinLearningRate    float64
+	Beta1              float64
+	Beta2              float64
+	Epsilon            float64
+	Seed               int64
+	MaxSteps           int
+	LogEvery           int
+	SaveEvery          int
+	GradClip           float64
+	SkipFinalTrainLoss bool
+	SkipValidationLoss bool
+	OnProgress         func(TrainingProgress) error
+	OnCheckpoint       func(step int) error
 }
 
 type TrainingReport struct {
@@ -34,6 +39,7 @@ type TrainingReport struct {
 type TrainingProgress struct {
 	Step           int
 	Loss           float64
+	LearningRate   float64
 	Elapsed        time.Duration
 	StepsPerSecond float64
 }
@@ -89,6 +95,18 @@ func (c TrainingConfig) Validate() error {
 	if c.LearningRate <= 0 {
 		return fmt.Errorf("learning rate must be positive")
 	}
+	if c.WarmupSteps < 0 {
+		return fmt.Errorf("warmup steps cannot be negative")
+	}
+	if c.DecaySteps < 0 {
+		return fmt.Errorf("decay steps cannot be negative")
+	}
+	if c.MinLearningRate < 0 {
+		return fmt.Errorf("min learning rate cannot be negative")
+	}
+	if c.MinLearningRate > c.LearningRate {
+		return fmt.Errorf("min learning rate cannot exceed learning rate")
+	}
 	if c.Beta1 <= 0 || c.Beta1 >= 1 {
 		return fmt.Errorf("beta1 must be between 0 and 1")
 	}
@@ -133,6 +151,7 @@ func (t *Trainer) Train(train, val []arithmetic.SequenceExample, cfg TrainingCon
 	startStep := t.Step
 	started := time.Now()
 	report := TrainingReport{Steps: t.Step}
+	batch := make([]arithmetic.SequenceExample, 0, cfg.BatchSize)
 	for epoch := 0; epoch < cfg.Epochs && !reachedMaxSteps(cfg, t.Step, startStep); epoch++ {
 		rng.Shuffle(len(indices), func(i, j int) {
 			indices[i], indices[j] = indices[j], indices[i]
@@ -142,9 +161,9 @@ func (t *Trainer) Train(train, val []arithmetic.SequenceExample, cfg TrainingCon
 				break
 			}
 			end := min(len(indices), start+cfg.BatchSize)
-			batch := make([]arithmetic.SequenceExample, end-start)
-			for i := range batch {
-				batch[i] = train[indices[start+i]]
+			batch = batch[:0]
+			for i := start; i < end; i++ {
+				batch = append(batch, train[indices[i]])
 			}
 			loss, err := t.trainBatch(batch, cfg)
 			if err != nil {
@@ -161,14 +180,14 @@ func (t *Trainer) Train(train, val []arithmetic.SequenceExample, cfg TrainingCon
 		}
 	}
 
-	if cfg.MaxSteps == 0 {
+	if cfg.MaxSteps == 0 && !cfg.SkipFinalTrainLoss {
 		trainLoss, err := AverageLoss(t.Model, train)
 		if err != nil {
 			return TrainingReport{}, err
 		}
 		report.TrainLoss = trainLoss
 	}
-	if len(val) > 0 {
+	if len(val) > 0 && !cfg.SkipValidationLoss {
 		valLoss, err := AverageLoss(t.Model, val)
 		if err != nil {
 			return TrainingReport{}, err
@@ -345,13 +364,30 @@ func newOptimizerState(model *Model) *OptimizerState {
 func applyAdam(params, grads, m, v []float64, step int, cfg TrainingConfig) {
 	beta1Pow := math.Pow(cfg.Beta1, float64(step))
 	beta2Pow := math.Pow(cfg.Beta2, float64(step))
+	learningRate := effectiveLearningRate(cfg, step)
 	for i, grad := range grads {
 		m[i] = cfg.Beta1*m[i] + (1-cfg.Beta1)*grad
 		v[i] = cfg.Beta2*v[i] + (1-cfg.Beta2)*grad*grad
 		mHat := m[i] / (1 - beta1Pow)
 		vHat := v[i] / (1 - beta2Pow)
-		params[i] -= cfg.LearningRate * mHat / (math.Sqrt(vHat) + cfg.Epsilon)
+		params[i] -= learningRate * mHat / (math.Sqrt(vHat) + cfg.Epsilon)
 	}
+}
+
+func effectiveLearningRate(cfg TrainingConfig, step int) float64 {
+	learningRate := cfg.LearningRate
+	if cfg.WarmupSteps > 0 && step < cfg.WarmupSteps {
+		learningRate *= float64(step) / float64(cfg.WarmupSteps)
+	}
+	if cfg.DecaySteps > 0 && step > cfg.WarmupSteps {
+		decayStep := min(step-cfg.WarmupSteps, cfg.DecaySteps)
+		progress := float64(decayStep) / float64(cfg.DecaySteps)
+		learningRate = cfg.LearningRate - (cfg.LearningRate-cfg.MinLearningRate)*progress
+	}
+	if learningRate < cfg.MinLearningRate {
+		return cfg.MinLearningRate
+	}
+	return learningRate
 }
 
 func scaleSlice(values []float64, scale float64) {
@@ -397,6 +433,7 @@ func maybeReportProgress(cfg TrainingConfig, step, startStep int, loss float64, 
 	return cfg.OnProgress(TrainingProgress{
 		Step:           step,
 		Loss:           loss,
+		LearningRate:   effectiveLearningRate(cfg, step),
 		Elapsed:        elapsed,
 		StepsPerSecond: stepsPerSecond,
 	})

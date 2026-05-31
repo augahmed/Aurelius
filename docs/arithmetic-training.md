@@ -20,6 +20,7 @@ Datasets are written as JSONL with one example per line:
 ```json
 {"prompt":"2 + 3 = ","completion":"5","operation":"add","level":1,"min_operand":0,"max_operand":9,"answer_digits":1,"template":"equation"}
 {"prompt":"What is 12 * 4? ","completion":"48","operation":"mul","level":4,"min_operand":0,"max_operand":12,"answer_digits":2,"template":"question"}
+{"prompt":"What is 57 + 11? ","completion":"ones: 7+1=8; tens: 5+1=6; answer: 68","answer":"68","operation":"add","level":2,"min_operand":10,"max_operand":99,"answer_digits":2,"template":"question","reasoning_style":"worked"}
 ```
 
 The generator writes:
@@ -32,6 +33,8 @@ The generator writes:
 ```
 
 `meta.json` records operand ranges, split sizes, enabled operations, enabled curriculum levels, answer filters, seed, and tokenizer choice.
+
+`-reasoning-style direct` keeps completions as final answers only. `-reasoning-style worked` writes digit-level solution steps and stores the final answer separately in `answer`. `-reasoning-style compact` writes a shorter digit-step trace with an `ans:` marker, which is useful for tiny models because it reduces formatting tokens while preserving intermediate supervision. Evaluation extracts the value after `answer:` or `ans:` so worked examples are scored by the final answer instead of requiring the full explanation text to match exactly.
 
 ## Curriculum Levels
 
@@ -106,6 +109,34 @@ go run ./cmd/aurelius gen-math-data \
   -seed 61
 ```
 
+Generate worked-solution carry/borrow data:
+
+```bash
+go run ./cmd/aurelius gen-math-data \
+  -output-dir ./data/arithmetic-l3-worked \
+  -train-count 10000 \
+  -val-count 1000 \
+  -operations add,sub \
+  -levels 3 \
+  -templates all \
+  -reasoning-style worked \
+  -seed 62
+```
+
+Generate compact worked carry/borrow data when full worked traces learn too slowly:
+
+```bash
+go run ./cmd/aurelius gen-math-data \
+  -output-dir ./data/arithmetic-l3-compact \
+  -train-count 10000 \
+  -val-count 1000 \
+  -operations add,sub \
+  -levels 3 \
+  -templates all \
+  -reasoning-style compact \
+  -seed 63
+```
+
 ## Training Workflow
 
 Generate a dataset:
@@ -120,6 +151,7 @@ go run ./cmd/aurelius gen-math-data \
   -operations add,sub,mul,div \
   -levels 1,2,3,4,5 \
   -templates all \
+  -reasoning-style direct \
   -seed 1
 ```
 
@@ -183,9 +215,13 @@ go run ./cmd/aurelius train-math \
   -embedding-dim 32 \
   -hidden-dim 128 \
   -num-heads 4 \
+  -num-layers 1 \
   -epochs 25 \
   -batch-size 32 \
-  -learning-rate 0.003
+  -learning-rate 0.003 \
+  -warmup-steps 100 \
+  -decay-steps 2000 \
+  -min-learning-rate 0.0003
 ```
 
 For larger curriculum training, use bounded runs with progress and checkpoint controls:
@@ -199,16 +235,22 @@ go run ./cmd/aurelius train-math \
   -embedding-dim 32 \
   -hidden-dim 128 \
   -num-heads 4 \
+  -num-layers 1 \
   -epochs 50 \
   -batch-size 32 \
   -learning-rate 0.003 \
+  -warmup-steps 200 \
+  -decay-steps 5000 \
+  -min-learning-rate 0.0003 \
   -max-steps 2000 \
   -log-every 100 \
   -save-every 1000 \
   -grad-clip 1
 ```
 
-`-max-steps` limits optimizer updates for the current invocation, which makes long jobs easier to run in chunks. When `-max-steps` is set, the final `train_loss` is the latest batch loss instead of a full training-set pass, so short smoke runs do not waste time rescoring the whole dataset. `-log-every` prints `step`, current batch loss, elapsed time, and steps/sec. `-save-every` writes periodic checkpoints next to the final checkpoint using names such as `math-transformer-curriculum-step1000.json`. `-grad-clip` clips gradients by global norm before Adam; `1` is a practical starting value for transformer runs.
+`-max-steps` limits optimizer updates for the current invocation, which makes long jobs easier to run in chunks. When `-max-steps` is set, the final `train_loss` is the latest batch loss instead of a full training-set pass, so short smoke runs do not waste time rescoring the whole dataset. `-log-every` prints `step`, current batch loss, current learning rate, elapsed time, and steps/sec. `-save-every` writes periodic checkpoints next to the final checkpoint using names such as `math-transformer-curriculum-step1000.json`. `-grad-clip` clips gradients by global norm before Adam; `1` is a practical starting value for transformer runs. `-warmup-steps`, `-decay-steps`, and `-min-learning-rate` apply a linear warmup followed by linear decay, which is useful when increasing model depth or introducing harder curriculum levels.
+
+For fastest iteration while tuning datasets or hyperparameters, add `-skip-accuracy-eval` to avoid slow before/after autoregressive validation generation and `-skip-loss-eval` to avoid final full-dataset loss sweeps. Keep `-log-every` enabled so you still see whether batch loss is moving.
 
 Resume a transformer checkpoint with the same command shape:
 
@@ -227,6 +269,33 @@ go run ./cmd/aurelius train-math \
   -grad-clip 1
 ```
 
+For quick pre-training experiments, cap the loaded example count before sequence expansion and validation:
+
+```bash
+go run ./cmd/aurelius train-math \
+  -model transformer \
+  -data-dir ./data/arithmetic-l3-compact \
+  -checkpoint ./artifacts/math-transformer-l3-compact-smoke.json \
+  -context-size 96 \
+  -embedding-dim 64 \
+  -hidden-dim 256 \
+  -num-heads 4 \
+  -num-layers 2 \
+  -epochs 10 \
+  -batch-size 16 \
+  -learning-rate 0.003 \
+  -warmup-steps 100 \
+  -decay-steps 1000 \
+  -min-learning-rate 0.0003 \
+  -max-steps 200 \
+  -log-every 25 \
+  -grad-clip 1 \
+  -train-limit 1000 \
+  -val-limit 200 \
+  -skip-accuracy-eval \
+  -skip-loss-eval
+```
+
 ## Evaluation
 
 Evaluate on held-out examples:
@@ -237,7 +306,7 @@ go run ./cmd/aurelius eval-math \
   -data ./data/arithmetic/val.jsonl
 ```
 
-The evaluator reports exact-match accuracy on generated completions.
+The evaluator reports exact-match accuracy on final answers. For direct datasets, the final answer is the whole completion. For worked datasets, the final answer is the `answer` field or the generated value after `answer:`.
 
 It also reports grouped accuracy:
 
@@ -254,11 +323,12 @@ For failure analysis, collect incorrect examples:
 go run ./cmd/aurelius eval-math \
   -checkpoint ./artifacts/math-transformer-l2.json \
   -data ./data/arithmetic-l2/val.jsonl \
+  -limit 500 \
   -show-errors 20 \
   -errors-out ./artifacts/math-transformer-l2-errors.json
 ```
 
-`-show-errors` prints the first `N` incorrect examples with prompt, expected completion, generated completion, operation, level, template, carry/borrow flags, and operand-range metadata. `-errors-out` writes all incorrect examples plus grouped template counts as JSON. Without these flags, `eval-math` keeps the normal concise output.
+`-show-errors` prints the first `N` incorrect examples with prompt, expected final answer, generated final answer, operation, level, template, reasoning style, carry/borrow flags, and operand-range metadata. `-errors-out` writes all incorrect examples plus grouped template counts as JSON. Without these flags, `eval-math` keeps the normal concise output.
 Debug output also groups by `answer_digits` and `small_difference`, which is useful for detecting digit-length failures such as two-digit subtraction producing one-digit answers.
 
 Use these grouped metrics to decide when to add harder levels. A practical starting sequence is:
@@ -300,18 +370,19 @@ The arithmetic trainer supports two backends:
 
 - byte tokenizer with vocabulary size `256`
 - token and positional embeddings
-- one causal self-attention block
+- configurable causal self-attention blocks with `-num-layers`
 - layer norms
 - residual connections
 - MLP block with GELU
+- final layer norm before the LM head
 - output projection to next-token logits
 
-The transformer backend now backpropagates through the full one-block path: embeddings, positional embeddings, layer norms, Q/K/V attention weights, attention output projection, MLP weights, and output head. It is still a small educational CPU implementation rather than an optimized training stack.
+The transformer backend backpropagates through embeddings, positional embeddings, each decoder layer's layer norms, Q/K/V attention weights, attention output projection, MLP weights, final layer norm, and output head. It is still a small educational CPU implementation rather than an optimized training stack; increasing `-num-layers` improves capacity but makes each optimizer step slower.
 
 ## Limitations
 
 - byte-level tokenization is simple, not efficient
-- the transformer backend is only one decoder block and trains slowly on CPU
+- multi-layer transformer runs train slowly on CPU
 - the transformer implementation favors readable manual gradients over speed or memory efficiency
 - arithmetic quality depends heavily on operand range and dataset size
 - exact-match accuracy is useful for arithmetic but not a general language-model benchmark

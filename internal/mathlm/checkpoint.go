@@ -159,6 +159,7 @@ func LoadAnyCheckpoint(path string) (*AnyTrainer, error) {
 		if checkpoint.Transformer == nil || checkpoint.Transformer.Model == nil {
 			return nil, fmt.Errorf("checkpoint missing transformer trainer model")
 		}
+		checkpoint.Transformer.Model.ensureLayerBlocks()
 		if err := checkpoint.Transformer.Model.LMConfig.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid checkpoint transformer config: %w", err)
 		}

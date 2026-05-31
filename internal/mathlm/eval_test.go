@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/augahmed/aurelius/internal/arithmetic"
+	sharedmodel "github.com/augahmed/aurelius/internal/model"
 )
 
 func TestEvaluateExamples(t *testing.T) {
@@ -105,4 +106,55 @@ func TestEvaluateExamplesCollectsErrors(t *testing.T) {
 	if !got.RequiresCarry || got.RequiresBorrow || got.MinOperand != 0 || got.MaxOperand != 9 {
 		t.Fatalf("unexpected error metadata: %+v", got)
 	}
+}
+
+func TestEvaluateExamplesExtractsWorkedAnswer(t *testing.T) {
+	prompt := "What is 2 + 2? "
+	model := scriptedModel{
+		promptLen: len(prompt),
+		output:    []byte("ones: 2+2=4; answer: 4\n"),
+	}
+	examples := []arithmetic.Example{{
+		Prompt:         prompt,
+		Completion:     "ones: 2+2=4; answer: 4",
+		Answer:         "4",
+		Operation:      "add",
+		Level:          1,
+		Template:       "question",
+		AnswerDigits:   1,
+		ReasoningStyle: "worked",
+	}}
+	report, err := EvaluateExamples(model, examples, len(model.output))
+	if err != nil {
+		t.Fatalf("EvaluateExamples error: %v", err)
+	}
+	if report.Correct != 1 || report.Accuracy != 1 {
+		t.Fatalf("correct=%d accuracy=%f, want perfect worked-answer extraction", report.Correct, report.Accuracy)
+	}
+}
+
+type scriptedModel struct {
+	promptLen int
+	output    []byte
+}
+
+func (m scriptedModel) Config() sharedmodel.Config {
+	return sharedmodel.Config{
+		VocabSize:     256,
+		ContextLength: 128,
+		EmbeddingDim:  1,
+		NumLayers:     1,
+		NumHeads:      1,
+	}
+}
+
+func (m scriptedModel) Forward(input []int, _ sharedmodel.Cache) ([]float64, error) {
+	index := len(input) - m.promptLen
+	token := int('\n')
+	if index >= 0 && index < len(m.output) {
+		token = int(m.output[index])
+	}
+	logits := make([]float64, 256)
+	logits[token] = 1
+	return logits, nil
 }

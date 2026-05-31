@@ -13,6 +13,7 @@ type TransformerConfig struct {
 	ContextSize  int   `json:"context_size"`
 	EmbeddingDim int   `json:"embedding_dim"`
 	NumHeads     int   `json:"num_heads"`
+	NumLayers    int   `json:"num_layers,omitempty"`
 	MLPDim       int   `json:"mlp_dim"`
 	Seed         int64 `json:"seed"`
 }
@@ -30,6 +31,9 @@ func (c TransformerConfig) Validate() error {
 	if c.NumHeads <= 0 {
 		return fmt.Errorf("num heads must be positive")
 	}
+	if c.NumLayers < 0 {
+		return fmt.Errorf("num layers cannot be negative")
+	}
 	if c.EmbeddingDim%c.NumHeads != 0 {
 		return fmt.Errorf("embedding dim %d must be divisible by num heads %d", c.EmbeddingDim, c.NumHeads)
 	}
@@ -39,28 +43,51 @@ func (c TransformerConfig) Validate() error {
 	return nil
 }
 
+type TransformerBlock struct {
+	LN1Gamma         []float64 `json:"ln1_gamma"`
+	LN1Beta          []float64 `json:"ln1_beta"`
+	QueryWeights     []float64 `json:"query_weights"`
+	KeyWeights       []float64 `json:"key_weights"`
+	ValueWeights     []float64 `json:"value_weights"`
+	AttentionWeights []float64 `json:"attention_weights"`
+	LN2Gamma         []float64 `json:"ln2_gamma"`
+	LN2Beta          []float64 `json:"ln2_beta"`
+	MLPInputWeights  []float64 `json:"mlp_input_weights"`
+	MLPInputBias     []float64 `json:"mlp_input_bias"`
+	MLPOutputWeights []float64 `json:"mlp_output_weights"`
+	MLPOutputBias    []float64 `json:"mlp_output_bias"`
+}
+
 type TransformerModel struct {
-	LMConfig           TransformerConfig `json:"config"`
-	TokenEmbeddings    []float64         `json:"token_embeddings"`
-	PositionEmbeddings []float64         `json:"position_embeddings"`
-	LN1Gamma           []float64         `json:"ln1_gamma"`
-	LN1Beta            []float64         `json:"ln1_beta"`
-	QueryWeights       []float64         `json:"query_weights"`
-	KeyWeights         []float64         `json:"key_weights"`
-	ValueWeights       []float64         `json:"value_weights"`
-	AttentionWeights   []float64         `json:"attention_weights"`
-	LN2Gamma           []float64         `json:"ln2_gamma"`
-	LN2Beta            []float64         `json:"ln2_beta"`
-	MLPInputWeights    []float64         `json:"mlp_input_weights"`
-	MLPInputBias       []float64         `json:"mlp_input_bias"`
-	MLPOutputWeights   []float64         `json:"mlp_output_weights"`
-	MLPOutputBias      []float64         `json:"mlp_output_bias"`
-	OutputWeights      []float64         `json:"output_weights"`
-	OutputBias         []float64         `json:"output_bias"`
+	LMConfig           TransformerConfig  `json:"config"`
+	TokenEmbeddings    []float64          `json:"token_embeddings"`
+	PositionEmbeddings []float64          `json:"position_embeddings"`
+	Layers             []TransformerBlock `json:"layers,omitempty"`
+	LN1Gamma           []float64          `json:"ln1_gamma"`
+	LN1Beta            []float64          `json:"ln1_beta"`
+	QueryWeights       []float64          `json:"query_weights"`
+	KeyWeights         []float64          `json:"key_weights"`
+	ValueWeights       []float64          `json:"value_weights"`
+	AttentionWeights   []float64          `json:"attention_weights"`
+	LN2Gamma           []float64          `json:"ln2_gamma"`
+	LN2Beta            []float64          `json:"ln2_beta"`
+	MLPInputWeights    []float64          `json:"mlp_input_weights"`
+	MLPInputBias       []float64          `json:"mlp_input_bias"`
+	MLPOutputWeights   []float64          `json:"mlp_output_weights"`
+	MLPOutputBias      []float64          `json:"mlp_output_bias"`
+	FinalLNGamma       []float64          `json:"final_ln_gamma,omitempty"`
+	FinalLNBeta        []float64          `json:"final_ln_beta,omitempty"`
+	OutputWeights      []float64          `json:"output_weights"`
+	OutputBias         []float64          `json:"output_bias"`
 }
 
 type transformerForwardCache struct {
-	Context   []int
+	Context    []int
+	Embeddings [][]float64
+	Layers     []transformerBlockForwardCache
+}
+
+type transformerBlockForwardCache struct {
 	X         [][]float64
 	Norm1     [][]float64
 	Q         [][]float64
@@ -77,6 +104,7 @@ type transformerForwardCache struct {
 }
 
 func NewTransformerModel(cfg TransformerConfig) (*TransformerModel, error) {
+	cfg.NumLayers = transformerLayerCount(cfg)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -85,30 +113,19 @@ func NewTransformerModel(cfg TransformerConfig) (*TransformerModel, error) {
 		LMConfig:           cfg,
 		TokenEmbeddings:    make([]float64, cfg.VocabSize*cfg.EmbeddingDim),
 		PositionEmbeddings: make([]float64, cfg.ContextSize*cfg.EmbeddingDim),
-		LN1Gamma:           ones(cfg.EmbeddingDim),
-		LN1Beta:            make([]float64, cfg.EmbeddingDim),
-		QueryWeights:       make([]float64, cfg.EmbeddingDim*cfg.EmbeddingDim),
-		KeyWeights:         make([]float64, cfg.EmbeddingDim*cfg.EmbeddingDim),
-		ValueWeights:       make([]float64, cfg.EmbeddingDim*cfg.EmbeddingDim),
-		AttentionWeights:   make([]float64, cfg.EmbeddingDim*cfg.EmbeddingDim),
-		LN2Gamma:           ones(cfg.EmbeddingDim),
-		LN2Beta:            make([]float64, cfg.EmbeddingDim),
-		MLPInputWeights:    make([]float64, cfg.EmbeddingDim*cfg.MLPDim),
-		MLPInputBias:       make([]float64, cfg.MLPDim),
-		MLPOutputWeights:   make([]float64, cfg.MLPDim*cfg.EmbeddingDim),
-		MLPOutputBias:      make([]float64, cfg.EmbeddingDim),
+		Layers:             make([]TransformerBlock, cfg.NumLayers),
+		FinalLNGamma:       ones(cfg.EmbeddingDim),
+		FinalLNBeta:        make([]float64, cfg.EmbeddingDim),
 		OutputWeights:      make([]float64, cfg.EmbeddingDim*cfg.VocabSize),
 		OutputBias:         make([]float64, cfg.VocabSize),
 	}
 	initWeights(model.TokenEmbeddings, rng, 0.04)
 	initWeights(model.PositionEmbeddings, rng, 0.04)
-	initWeights(model.QueryWeights, rng, 0.04)
-	initWeights(model.KeyWeights, rng, 0.04)
-	initWeights(model.ValueWeights, rng, 0.04)
-	initWeights(model.AttentionWeights, rng, 0.04)
-	initWeights(model.MLPInputWeights, rng, 0.04)
-	initWeights(model.MLPOutputWeights, rng, 0.04)
+	for layer := range model.Layers {
+		model.Layers[layer] = newTransformerBlock(cfg, rng)
+	}
 	initWeights(model.OutputWeights, rng, 0.04)
+	model.syncLegacyBlockFields()
 	return model, nil
 }
 
@@ -117,7 +134,7 @@ func (m *TransformerModel) Config() sharedmodel.Config {
 		VocabSize:     m.LMConfig.VocabSize,
 		ContextLength: m.LMConfig.ContextSize,
 		EmbeddingDim:  m.LMConfig.EmbeddingDim,
-		NumLayers:     1,
+		NumLayers:     transformerLayerCount(m.LMConfig),
 		NumHeads:      m.LMConfig.NumHeads,
 	}
 }
@@ -175,6 +192,7 @@ func (m *TransformerModel) forwardContext(context []int) ([][]float64, error) {
 }
 
 func (m *TransformerModel) forwardContextWithCache(context []int) ([][]float64, *transformerForwardCache, error) {
+	m.ensureLayerBlocks()
 	if len(context) != m.LMConfig.ContextSize {
 		return nil, nil, fmt.Errorf("context length = %d, want %d", len(context), m.LMConfig.ContextSize)
 	}
@@ -192,15 +210,31 @@ func (m *TransformerModel) forwardContextWithCache(context []int) ([][]float64, 
 		}
 	}
 
+	states := x
+	layerCaches := make([]transformerBlockForwardCache, len(m.Layers))
+	for layerIndex := range m.Layers {
+		var layerCache transformerBlockForwardCache
+		states, layerCache = forwardTransformerBlock(cfg, &m.Layers[layerIndex], states)
+		layerCaches[layerIndex] = layerCache
+	}
+	cache := &transformerForwardCache{
+		Context:    append([]int(nil), context...),
+		Embeddings: x,
+		Layers:     layerCaches,
+	}
+	return states, cache, nil
+}
+
+func forwardTransformerBlock(cfg TransformerConfig, block *TransformerBlock, x [][]float64) ([][]float64, transformerBlockForwardCache) {
 	norm1 := make([][]float64, cfg.ContextSize)
 	q := make([][]float64, cfg.ContextSize)
 	k := make([][]float64, cfg.ContextSize)
 	v := make([][]float64, cfg.ContextSize)
 	for pos := range x {
-		norm1[pos] = layerNorm(x[pos], m.LN1Gamma, m.LN1Beta)
-		q[pos] = linear(norm1[pos], m.QueryWeights, cfg.EmbeddingDim)
-		k[pos] = linear(norm1[pos], m.KeyWeights, cfg.EmbeddingDim)
-		v[pos] = linear(norm1[pos], m.ValueWeights, cfg.EmbeddingDim)
+		norm1[pos] = layerNorm(x[pos], block.LN1Gamma, block.LN1Beta)
+		q[pos] = linear(norm1[pos], block.QueryWeights, cfg.EmbeddingDim)
+		k[pos] = linear(norm1[pos], block.KeyWeights, cfg.EmbeddingDim)
+		v[pos] = linear(norm1[pos], block.ValueWeights, cfg.EmbeddingDim)
 	}
 
 	headDim := cfg.EmbeddingDim / cfg.NumHeads
@@ -232,7 +266,7 @@ func (m *TransformerModel) forwardContextWithCache(context []int) ([][]float64, 
 
 	residual1 := make([][]float64, cfg.ContextSize)
 	for pos := range attended {
-		proj := linear(attended[pos], m.AttentionWeights, cfg.EmbeddingDim)
+		proj := linear(attended[pos], block.AttentionWeights, cfg.EmbeddingDim)
 		residual1[pos] = make([]float64, cfg.EmbeddingDim)
 		for dim := 0; dim < cfg.EmbeddingDim; dim++ {
 			residual1[pos][dim] = x[pos][dim] + proj[dim]
@@ -245,13 +279,13 @@ func (m *TransformerModel) forwardContextWithCache(context []int) ([][]float64, 
 	mlpHiddenValues := make([][]float64, cfg.ContextSize)
 	mlpOutValues := make([][]float64, cfg.ContextSize)
 	for pos := range residual1 {
-		norm2 := layerNorm(residual1[pos], m.LN2Gamma, m.LN2Beta)
-		hiddenPre := linearWithBias(norm2, m.MLPInputWeights, m.MLPInputBias, cfg.MLPDim)
+		norm2 := layerNorm(residual1[pos], block.LN2Gamma, block.LN2Beta)
+		hiddenPre := linearWithBias(norm2, block.MLPInputWeights, block.MLPInputBias, cfg.MLPDim)
 		hidden := make([]float64, len(hiddenPre))
 		for i := range hiddenPre {
 			hidden[i] = gelu(hiddenPre[i])
 		}
-		mlpOut := linearWithBias(hidden, m.MLPOutputWeights, m.MLPOutputBias, cfg.EmbeddingDim)
+		mlpOut := linearWithBias(hidden, block.MLPOutputWeights, block.MLPOutputBias, cfg.EmbeddingDim)
 		norm2Values[pos] = norm2
 		mlpPreValues[pos] = hiddenPre
 		mlpHiddenValues[pos] = hidden
@@ -261,8 +295,7 @@ func (m *TransformerModel) forwardContextWithCache(context []int) ([][]float64, 
 			states[pos][dim] = residual1[pos][dim] + mlpOut[dim]
 		}
 	}
-	cache := &transformerForwardCache{
-		Context:   append([]int(nil), context...),
+	cache := transformerBlockForwardCache{
 		X:         x,
 		Norm1:     norm1,
 		Q:         q,
@@ -277,11 +310,94 @@ func (m *TransformerModel) forwardContextWithCache(context []int) ([][]float64, 
 		MLPOut:    mlpOutValues,
 		States:    states,
 	}
-	return states, cache, nil
+	return states, cache
 }
 
 func (m *TransformerModel) logitsForState(state []float64) []float64 {
-	return linearWithBias(state, m.OutputWeights, m.OutputBias, m.LMConfig.VocabSize)
+	m.ensureFinalLayerNorm()
+	normalized := layerNorm(state, m.FinalLNGamma, m.FinalLNBeta)
+	return linearWithBias(normalized, m.OutputWeights, m.OutputBias, m.LMConfig.VocabSize)
+}
+
+func transformerLayerCount(cfg TransformerConfig) int {
+	if cfg.NumLayers <= 0 {
+		return 1
+	}
+	return cfg.NumLayers
+}
+
+func newTransformerBlock(cfg TransformerConfig, rng *rand.Rand) TransformerBlock {
+	block := TransformerBlock{
+		LN1Gamma:         ones(cfg.EmbeddingDim),
+		LN1Beta:          make([]float64, cfg.EmbeddingDim),
+		QueryWeights:     make([]float64, cfg.EmbeddingDim*cfg.EmbeddingDim),
+		KeyWeights:       make([]float64, cfg.EmbeddingDim*cfg.EmbeddingDim),
+		ValueWeights:     make([]float64, cfg.EmbeddingDim*cfg.EmbeddingDim),
+		AttentionWeights: make([]float64, cfg.EmbeddingDim*cfg.EmbeddingDim),
+		LN2Gamma:         ones(cfg.EmbeddingDim),
+		LN2Beta:          make([]float64, cfg.EmbeddingDim),
+		MLPInputWeights:  make([]float64, cfg.EmbeddingDim*cfg.MLPDim),
+		MLPInputBias:     make([]float64, cfg.MLPDim),
+		MLPOutputWeights: make([]float64, cfg.MLPDim*cfg.EmbeddingDim),
+		MLPOutputBias:    make([]float64, cfg.EmbeddingDim),
+	}
+	initWeights(block.QueryWeights, rng, 0.04)
+	initWeights(block.KeyWeights, rng, 0.04)
+	initWeights(block.ValueWeights, rng, 0.04)
+	initWeights(block.AttentionWeights, rng, 0.04)
+	initWeights(block.MLPInputWeights, rng, 0.04)
+	initWeights(block.MLPOutputWeights, rng, 0.04)
+	return block
+}
+
+func (m *TransformerModel) ensureLayerBlocks() {
+	m.LMConfig.NumLayers = transformerLayerCount(m.LMConfig)
+	m.ensureFinalLayerNorm()
+	if len(m.Layers) == 0 {
+		m.Layers = []TransformerBlock{{
+			LN1Gamma:         m.LN1Gamma,
+			LN1Beta:          m.LN1Beta,
+			QueryWeights:     m.QueryWeights,
+			KeyWeights:       m.KeyWeights,
+			ValueWeights:     m.ValueWeights,
+			AttentionWeights: m.AttentionWeights,
+			LN2Gamma:         m.LN2Gamma,
+			LN2Beta:          m.LN2Beta,
+			MLPInputWeights:  m.MLPInputWeights,
+			MLPInputBias:     m.MLPInputBias,
+			MLPOutputWeights: m.MLPOutputWeights,
+			MLPOutputBias:    m.MLPOutputBias,
+		}}
+	}
+	m.syncLegacyBlockFields()
+}
+
+func (m *TransformerModel) ensureFinalLayerNorm() {
+	if len(m.FinalLNGamma) != m.LMConfig.EmbeddingDim {
+		m.FinalLNGamma = ones(m.LMConfig.EmbeddingDim)
+	}
+	if len(m.FinalLNBeta) != m.LMConfig.EmbeddingDim {
+		m.FinalLNBeta = make([]float64, m.LMConfig.EmbeddingDim)
+	}
+}
+
+func (m *TransformerModel) syncLegacyBlockFields() {
+	if len(m.Layers) == 0 {
+		return
+	}
+	first := &m.Layers[0]
+	m.LN1Gamma = first.LN1Gamma
+	m.LN1Beta = first.LN1Beta
+	m.QueryWeights = first.QueryWeights
+	m.KeyWeights = first.KeyWeights
+	m.ValueWeights = first.ValueWeights
+	m.AttentionWeights = first.AttentionWeights
+	m.LN2Gamma = first.LN2Gamma
+	m.LN2Beta = first.LN2Beta
+	m.MLPInputWeights = first.MLPInputWeights
+	m.MLPInputBias = first.MLPInputBias
+	m.MLPOutputWeights = first.MLPOutputWeights
+	m.MLPOutputBias = first.MLPOutputBias
 }
 
 func ones(size int) []float64 {

@@ -13,6 +13,7 @@ func TestTransformerForwardShape(t *testing.T) {
 		ContextSize:  8,
 		EmbeddingDim: 8,
 		NumHeads:     2,
+		NumLayers:    2,
 		MLPDim:       16,
 		Seed:         1,
 	})
@@ -25,6 +26,9 @@ func TestTransformerForwardShape(t *testing.T) {
 	}
 	if len(logits) != 256 {
 		t.Fatalf("len(logits) = %d, want 256", len(logits))
+	}
+	if got := model.Config().NumLayers; got != 2 {
+		t.Fatalf("NumLayers = %d, want 2", got)
 	}
 }
 
@@ -109,6 +113,7 @@ func TestTransformerTrainingUpdatesBlockWeights(t *testing.T) {
 		ContextSize:  8,
 		EmbeddingDim: 16,
 		NumHeads:     2,
+		NumLayers:    2,
 		MLPDim:       32,
 		Seed:         13,
 	})
@@ -121,7 +126,9 @@ func TestTransformerTrainingUpdatesBlockWeights(t *testing.T) {
 	}
 	originalTokenEmbedding := append([]float64(nil), model.TokenEmbeddings...)
 	originalQueryWeights := append([]float64(nil), model.QueryWeights...)
+	originalSecondLayerQueryWeights := append([]float64(nil), model.Layers[1].QueryWeights...)
 	originalMLPInputWeights := append([]float64(nil), model.MLPInputWeights...)
+	originalFinalLNGamma := append([]float64(nil), model.FinalLNGamma...)
 
 	examples := []arithmetic.Example{
 		{Prompt: "2 + 2 = ", Completion: "4", Operation: "add", Level: 1},
@@ -148,8 +155,34 @@ func TestTransformerTrainingUpdatesBlockWeights(t *testing.T) {
 	if slicesEqual(originalQueryWeights, model.QueryWeights) {
 		t.Fatal("query weights did not change")
 	}
+	if slicesEqual(originalSecondLayerQueryWeights, model.Layers[1].QueryWeights) {
+		t.Fatal("second layer query weights did not change")
+	}
 	if slicesEqual(originalMLPInputWeights, model.MLPInputWeights) {
 		t.Fatal("MLP input weights did not change")
+	}
+	if slicesEqual(originalFinalLNGamma, model.FinalLNGamma) {
+		t.Fatal("final layer norm gamma did not change")
+	}
+}
+
+func TestTransformerDefaultsToOneLayer(t *testing.T) {
+	model, err := NewTransformerModel(TransformerConfig{
+		VocabSize:    256,
+		ContextSize:  8,
+		EmbeddingDim: 8,
+		NumHeads:     2,
+		MLPDim:       16,
+		Seed:         31,
+	})
+	if err != nil {
+		t.Fatalf("NewTransformerModel error: %v", err)
+	}
+	if got := model.Config().NumLayers; got != 1 {
+		t.Fatalf("NumLayers = %d, want default 1", got)
+	}
+	if len(model.Layers) != 1 {
+		t.Fatalf("len(layers) = %d, want 1", len(model.Layers))
 	}
 }
 

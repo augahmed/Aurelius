@@ -17,6 +17,7 @@ import (
 type Example struct {
 	Prompt          string `json:"prompt"`
 	Completion      string `json:"completion"`
+	Answer          string `json:"answer,omitempty"`
 	Operation       string `json:"operation"`
 	Level           int    `json:"level"`
 	MinOperand      int    `json:"min_operand"`
@@ -26,6 +27,7 @@ type Example struct {
 	RequiresCarry   bool   `json:"requires_carry,omitempty"`
 	RequiresBorrow  bool   `json:"requires_borrow,omitempty"`
 	Template        string `json:"template"`
+	ReasoningStyle  string `json:"reasoning_style,omitempty"`
 }
 
 type GenerateConfig struct {
@@ -35,6 +37,8 @@ type GenerateConfig struct {
 	MaxOperand          int
 	Operations          []string
 	Levels              []int
+	Templates           []string
+	ReasoningStyle      string
 	AnswerDigits        []int
 	SmallDifferenceOnly bool
 	Seed                int64
@@ -57,6 +61,8 @@ type Metadata struct {
 	MaxOperand          int      `json:"max_operand"`
 	Operations          []string `json:"operations"`
 	Levels              []int    `json:"levels"`
+	Templates           []string `json:"templates,omitempty"`
+	ReasoningStyle      string   `json:"reasoning_style"`
 	AnswerDigits        []int    `json:"answer_digits,omitempty"`
 	SmallDifferenceOnly bool     `json:"small_difference_only,omitempty"`
 	Seed                int64    `json:"seed"`
@@ -79,10 +85,13 @@ type SequenceExample struct {
 type generationTask struct {
 	Level     int
 	Operation string
+	Template  string
 }
 
 var supportedOperations = []string{"add", "sub", "mul", "div", "word"}
 var supportedLevels = []int{1, 2, 3, 4, 5, 6}
+var supportedTemplates = []string{"equation", "question", "solve"}
+var supportedReasoningStyles = []string{"direct", "worked", "compact"}
 
 func (c GenerateConfig) Validate() error {
 	if c.TrainCount <= 0 {
@@ -119,6 +128,16 @@ func (c GenerateConfig) Validate() error {
 			return fmt.Errorf("answer digits must be positive")
 		}
 	}
+	templates := templatesOrDefault(c.Templates)
+	for _, template := range templates {
+		if !slices.Contains(supportedTemplates, template) {
+			return fmt.Errorf("unsupported template %q", template)
+		}
+	}
+	reasoningStyle := reasoningStyleOrDefault(c.ReasoningStyle)
+	if !slices.Contains(supportedReasoningStyles, reasoningStyle) {
+		return fmt.Errorf("unsupported reasoning style %q", c.ReasoningStyle)
+	}
 	if c.SmallDifferenceOnly && !slices.Contains(c.Operations, "sub") {
 		return fmt.Errorf("small difference filtering requires subtraction examples")
 	}
@@ -127,6 +146,8 @@ func (c GenerateConfig) Validate() error {
 
 func GenerateDataset(outputDir string, cfg GenerateConfig) error {
 	cfg.Levels = levelsOrDefault(cfg.Levels, cfg.Operations)
+	cfg.Templates = templatesOrDefault(cfg.Templates)
+	cfg.ReasoningStyle = reasoningStyleOrDefault(cfg.ReasoningStyle)
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -152,6 +173,8 @@ func GenerateDataset(outputDir string, cfg GenerateConfig) error {
 		MaxOperand:          cfg.MaxOperand,
 		Operations:          append([]string(nil), cfg.Operations...),
 		Levels:              append([]int(nil), cfg.Levels...),
+		Templates:           append([]string(nil), cfg.Templates...),
+		ReasoningStyle:      cfg.ReasoningStyle,
 		AnswerDigits:        append([]int(nil), cfg.AnswerDigits...),
 		SmallDifferenceOnly: cfg.SmallDifferenceOnly,
 		Seed:                cfg.Seed,
@@ -276,7 +299,13 @@ func LoadExamples(path string) ([]Example, error) {
 }
 
 func normalizeExampleMetadata(example *Example) {
-	answer, err := strconv.Atoi(strings.TrimSpace(example.Completion))
+	if example.ReasoningStyle == "" {
+		example.ReasoningStyle = "direct"
+	}
+	if strings.TrimSpace(example.Answer) == "" {
+		example.Answer = FinalAnswer(*example)
+	}
+	answer, err := strconv.Atoi(strings.TrimSpace(example.Answer))
 	if err == nil {
 		if example.AnswerDigits <= 0 {
 			example.AnswerDigits = digitCount(answer)
@@ -285,6 +314,63 @@ func normalizeExampleMetadata(example *Example) {
 			example.SmallDifference = true
 		}
 	}
+}
+
+func FinalAnswer(example Example) string {
+	if strings.TrimSpace(example.Answer) != "" {
+		return strings.TrimSpace(example.Answer)
+	}
+	return ExtractFinalAnswer(example.Completion)
+}
+
+func ExtractFinalAnswer(text string) string {
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+	marker, index := lastAnswerMarker(lower)
+	if index >= 0 {
+		return firstIntegerOrTrimmed(trimmed[index+len(marker):])
+	}
+	return trimmed
+}
+
+func lastAnswerMarker(lower string) (string, int) {
+	bestMarker := ""
+	bestIndex := -1
+	for _, marker := range []string{"answer:", "ans:"} {
+		index := strings.LastIndex(lower, marker)
+		if index > bestIndex {
+			bestMarker = marker
+			bestIndex = index
+		}
+	}
+	return bestMarker, bestIndex
+}
+
+func firstIntegerOrTrimmed(text string) string {
+	text = strings.TrimSpace(text)
+	start := -1
+	for i, r := range text {
+		if r == '-' || (r >= '0' && r <= '9') {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return text
+	}
+	end := start
+	for end < len(text) {
+		ch := text[end]
+		if end == start && ch == '-' {
+			end++
+			continue
+		}
+		if ch < '0' || ch > '9' {
+			break
+		}
+		end++
+	}
+	return text[start:end]
 }
 
 func BuildTrainingSequences(examples []Example, tok tokenizer.Tokenizer, contextSize int) ([]SequenceExample, error) {
@@ -357,10 +443,13 @@ func buildGenerationTasks(cfg GenerateConfig) []generationTask {
 	tasks := make([]generationTask, 0)
 	for _, level := range cfg.Levels {
 		for _, operation := range compatibleOperations(level, cfg.Operations) {
-			tasks = append(tasks, generationTask{
-				Level:     level,
-				Operation: operation,
-			})
+			for _, template := range cfg.Templates {
+				tasks = append(tasks, generationTask{
+					Level:     level,
+					Operation: operation,
+					Template:  template,
+				})
+			}
 		}
 	}
 	return tasks
@@ -368,7 +457,7 @@ func buildGenerationTasks(cfg GenerateConfig) []generationTask {
 
 func generateExampleForTask(cfg GenerateConfig, task generationTask, rng *rand.Rand) Example {
 	if task.Level == 6 {
-		return generateWordExample(randomOperand(1, 20, rng), randomOperand(1, 20, rng), rng)
+		return generateWordExample(randomOperand(1, 20, rng), randomOperand(1, 20, rng), cfg.ReasoningStyle, rng)
 	}
 	const maxAttempts = 10000
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -382,9 +471,10 @@ func generateExampleForTask(cfg GenerateConfig, task generationTask, rng *rand.R
 
 func generateCandidateForTask(cfg GenerateConfig, task generationTask, rng *rand.Rand) Example {
 	left, right, answer, requiresCarry, requiresBorrow := operandsForLevel(task.Operation, task.Level, cfg.MinOperand, cfg.MaxOperand, rng)
-	template := rng.Intn(3)
+	answerText := fmt.Sprintf("%d", answer)
 	example := Example{
-		Completion:      fmt.Sprintf("%d", answer),
+		Completion:      completionForReasoningStyle(task.Operation, left, right, answer, cfg.ReasoningStyle),
+		Answer:          answerText,
 		Operation:       task.Operation,
 		Level:           task.Level,
 		MinOperand:      minOperandForLevel(task.Level, cfg.MinOperand),
@@ -393,19 +483,130 @@ func generateCandidateForTask(cfg GenerateConfig, task generationTask, rng *rand
 		SmallDifference: task.Operation == "sub" && answer >= 0 && answer <= 9,
 		RequiresCarry:   requiresCarry,
 		RequiresBorrow:  requiresBorrow,
+		ReasoningStyle:  cfg.ReasoningStyle,
 	}
-	switch template {
-	case 0:
+	switch task.Template {
+	case "equation":
 		example.Prompt = fmt.Sprintf("%d %s %d = ", left, symbolForOperation(task.Operation), right)
 		example.Template = "equation"
-	case 1:
+	case "question":
 		example.Prompt = fmt.Sprintf("What is %d %s %d? ", left, symbolForOperation(task.Operation), right)
 		example.Template = "question"
-	default:
+	case "solve":
 		example.Prompt = fmt.Sprintf("Solve: %d %s %d = ", left, symbolForOperation(task.Operation), right)
 		example.Template = "solve"
+	default:
+		panic("unsupported template")
 	}
 	return example
+}
+
+func completionForReasoningStyle(operation string, left, right, answer int, reasoningStyle string) string {
+	switch reasoningStyleOrDefault(reasoningStyle) {
+	case "direct":
+		return fmt.Sprintf("%d", answer)
+	case "compact":
+		return compactCompletion(operation, left, right, answer)
+	}
+	switch operation {
+	case "add":
+		return workedAddition(left, right, answer)
+	case "sub":
+		return workedSubtraction(left, right, answer)
+	case "mul":
+		return fmt.Sprintf("multiply: %d*%d=%d; answer: %d", left, right, answer, answer)
+	case "div":
+		return fmt.Sprintf("check: %d*%d=%d; answer: %d", right, answer, left, answer)
+	default:
+		return fmt.Sprintf("answer: %d", answer)
+	}
+}
+
+func compactCompletion(operation string, left, right, answer int) string {
+	switch operation {
+	case "add":
+		return compactAddition(left, right, answer)
+	case "sub":
+		return compactSubtraction(left, right, answer)
+	case "mul":
+		return fmt.Sprintf("mul:%d*%d=%d; ans:%d", left, right, answer, answer)
+	case "div":
+		return fmt.Sprintf("chk:%d*%d=%d; ans:%d", right, answer, left, answer)
+	default:
+		return fmt.Sprintf("ans:%d", answer)
+	}
+}
+
+func compactAddition(left, right, answer int) string {
+	if left < 10 && right < 10 {
+		return fmt.Sprintf("o:%d+%d=%d; ans:%d", left, right, answer, answer)
+	}
+	leftOnes, rightOnes := left%10, right%10
+	leftTens, rightTens := left/10, right/10
+	onesSum := leftOnes + rightOnes
+	onesDigit := onesSum % 10
+	carry := onesSum / 10
+	tensSum := leftTens + rightTens + carry
+	if carry > 0 {
+		return fmt.Sprintf("o:%d+%d=%d w%d c%d; t:%d+%d+%d=%d; ans:%d",
+			leftOnes, rightOnes, onesSum, onesDigit, carry, leftTens, rightTens, carry, tensSum, answer)
+	}
+	return fmt.Sprintf("o:%d+%d=%d; t:%d+%d=%d; ans:%d",
+		leftOnes, rightOnes, onesSum, leftTens, rightTens, tensSum, answer)
+}
+
+func compactSubtraction(left, right, answer int) string {
+	if left < 10 && right < 10 {
+		return fmt.Sprintf("o:%d-%d=%d; ans:%d", left, right, answer, answer)
+	}
+	leftOnes, rightOnes := left%10, right%10
+	leftTens, rightTens := left/10, right/10
+	if leftOnes < rightOnes {
+		onesDigit := leftOnes + 10 - rightOnes
+		tensDigit := leftTens - 1 - rightTens
+		return fmt.Sprintf("o:%d-%d=%d b1; t:%d-%d=%d; ans:%d",
+			leftOnes+10, rightOnes, onesDigit, leftTens-1, rightTens, tensDigit, answer)
+	}
+	onesDigit := leftOnes - rightOnes
+	tensDigit := leftTens - rightTens
+	return fmt.Sprintf("o:%d-%d=%d; t:%d-%d=%d; ans:%d",
+		leftOnes, rightOnes, onesDigit, leftTens, rightTens, tensDigit, answer)
+}
+
+func workedAddition(left, right, answer int) string {
+	if left < 10 && right < 10 {
+		return fmt.Sprintf("ones: %d+%d=%d; answer: %d", left, right, answer, answer)
+	}
+	leftOnes, rightOnes := left%10, right%10
+	leftTens, rightTens := left/10, right/10
+	onesSum := leftOnes + rightOnes
+	onesDigit := onesSum % 10
+	carry := onesSum / 10
+	tensSum := leftTens + rightTens + carry
+	if carry > 0 {
+		return fmt.Sprintf("ones: %d+%d=%d so write %d carry %d; tens: %d+%d+%d=%d; answer: %d",
+			leftOnes, rightOnes, onesSum, onesDigit, carry, leftTens, rightTens, carry, tensSum, answer)
+	}
+	return fmt.Sprintf("ones: %d+%d=%d; tens: %d+%d=%d; answer: %d",
+		leftOnes, rightOnes, onesSum, leftTens, rightTens, tensSum, answer)
+}
+
+func workedSubtraction(left, right, answer int) string {
+	if left < 10 && right < 10 {
+		return fmt.Sprintf("ones: %d-%d=%d; answer: %d", left, right, answer, answer)
+	}
+	leftOnes, rightOnes := left%10, right%10
+	leftTens, rightTens := left/10, right/10
+	if leftOnes < rightOnes {
+		onesDigit := leftOnes + 10 - rightOnes
+		tensDigit := leftTens - 1 - rightTens
+		return fmt.Sprintf("ones: borrow 1 ten; %d-%d=%d; tens: %d-%d=%d; answer: %d",
+			leftOnes+10, rightOnes, onesDigit, leftTens-1, rightTens, tensDigit, answer)
+	}
+	onesDigit := leftOnes - rightOnes
+	tensDigit := leftTens - rightTens
+	return fmt.Sprintf("ones: %d-%d=%d; tens: %d-%d=%d; answer: %d",
+		leftOnes, rightOnes, onesDigit, leftTens, rightTens, tensDigit, answer)
 }
 
 func matchesAnswerFilters(example Example, cfg GenerateConfig) bool {
@@ -476,32 +677,56 @@ func boolPtr(value bool) *bool {
 	return &value
 }
 
-func generateWordExample(left, right int, rng *rand.Rand) Example {
+func generateWordExample(left, right int, reasoningStyle string, rng *rand.Rand) Example {
 	extra := randomOperand(1, 9, rng)
 	answer := left + right - extra
+	answerText := fmt.Sprintf("%d", answer)
 	if answer < 0 {
 		answer = left + right + extra
+		answerText = fmt.Sprintf("%d", answer)
 		return Example{
-			Prompt:       fmt.Sprintf("Mia has %d marbles, gets %d more, then gets %d more. How many marbles? ", left, right, extra),
-			Completion:   fmt.Sprintf("%d", answer),
-			Operation:    "word",
-			Level:        6,
-			MinOperand:   1,
-			MaxOperand:   20,
-			AnswerDigits: digitCount(answer),
-			Template:     "two_step_word",
+			Prompt:         fmt.Sprintf("Mia has %d marbles, gets %d more, then gets %d more. How many marbles? ", left, right, extra),
+			Completion:     wordCompletion(left, right, extra, answer, "add_add", reasoningStyle),
+			Answer:         answerText,
+			Operation:      "word",
+			Level:          6,
+			MinOperand:     1,
+			MaxOperand:     20,
+			AnswerDigits:   digitCount(answer),
+			Template:       "two_step_word",
+			ReasoningStyle: reasoningStyleOrDefault(reasoningStyle),
 		}
 	}
 	return Example{
-		Prompt:       fmt.Sprintf("Mia has %d marbles, gets %d more, then gives away %d. How many marbles? ", left, right, extra),
-		Completion:   fmt.Sprintf("%d", answer),
-		Operation:    "word",
-		Level:        6,
-		MinOperand:   1,
-		MaxOperand:   20,
-		AnswerDigits: digitCount(answer),
-		Template:     "two_step_word",
+		Prompt:         fmt.Sprintf("Mia has %d marbles, gets %d more, then gives away %d. How many marbles? ", left, right, extra),
+		Completion:     wordCompletion(left, right, extra, answer, "add_sub", reasoningStyle),
+		Answer:         answerText,
+		Operation:      "word",
+		Level:          6,
+		MinOperand:     1,
+		MaxOperand:     20,
+		AnswerDigits:   digitCount(answer),
+		Template:       "two_step_word",
+		ReasoningStyle: reasoningStyleOrDefault(reasoningStyle),
 	}
+}
+
+func wordCompletion(left, right, extra, answer int, pattern, reasoningStyle string) string {
+	switch reasoningStyleOrDefault(reasoningStyle) {
+	case "direct":
+		return fmt.Sprintf("%d", answer)
+	case "compact":
+		sum := left + right
+		if pattern == "add_add" {
+			return fmt.Sprintf("s:%d+%d=%d; n:%d+%d=%d; ans:%d", left, right, sum, sum, extra, answer, answer)
+		}
+		return fmt.Sprintf("s:%d+%d=%d; n:%d-%d=%d; ans:%d", left, right, sum, sum, extra, answer, answer)
+	}
+	sum := left + right
+	if pattern == "add_add" {
+		return fmt.Sprintf("first: %d+%d=%d; then: %d+%d=%d; answer: %d", left, right, sum, sum, extra, answer, answer)
+	}
+	return fmt.Sprintf("first: %d+%d=%d; then: %d-%d=%d; answer: %d", left, right, sum, sum, extra, answer, answer)
 }
 
 func compatibleOperations(level int, requested []string) []string {
@@ -533,6 +758,21 @@ func levelsOrDefault(levels []int, operations []string) []int {
 		return defaults
 	}
 	return append([]int(nil), levels...)
+}
+
+func templatesOrDefault(templates []string) []string {
+	if len(templates) == 0 {
+		return append([]string(nil), supportedTemplates...)
+	}
+	return append([]string(nil), templates...)
+}
+
+func reasoningStyleOrDefault(reasoningStyle string) string {
+	reasoningStyle = strings.TrimSpace(reasoningStyle)
+	if reasoningStyle == "" {
+		return "direct"
+	}
+	return reasoningStyle
 }
 
 func minOperandForLevel(level, fallback int) int {

@@ -456,6 +456,8 @@ func TestRunTrainMathWithTrainingControls(t *testing.T) {
 		"-log-every", "1",
 		"-save-every", "1",
 		"-grad-clip", "1",
+		"-skip-accuracy-eval",
+		"-skip-loss-eval",
 		"-seed", "32",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -467,6 +469,9 @@ func TestRunTrainMathWithTrainingControls(t *testing.T) {
 	}
 	if !strings.Contains(output, "checkpoint_step=1 path=") {
 		t.Fatalf("stdout = %q, want periodic checkpoint line", output)
+	}
+	if !strings.Contains(output, "val_accuracy=skipped") {
+		t.Fatalf("stdout = %q, want skipped accuracy line", output)
 	}
 	if _, err := os.Stat(periodicCheckpointPath(checkpointPath, 1)); err != nil {
 		t.Fatalf("periodic checkpoint missing: %v", err)

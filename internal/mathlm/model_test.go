@@ -102,10 +102,13 @@ func TestTrainingControlsMaxStepsAndProgress(t *testing.T) {
 		t.Fatalf("BuildTrainingSequences error: %v", err)
 	}
 	progressSteps := []int{}
+	learningRates := []float64{}
 	report, err := trainer.Train(sequences, sequences, TrainingConfig{
 		Epochs:       20,
 		BatchSize:    1,
 		LearningRate: 0.01,
+		WarmupSteps:  2,
+		DecaySteps:   2,
 		Beta1:        0.9,
 		Beta2:        0.999,
 		Epsilon:      1e-8,
@@ -115,6 +118,7 @@ func TestTrainingControlsMaxStepsAndProgress(t *testing.T) {
 		GradClip:     0.5,
 		OnProgress: func(progress TrainingProgress) error {
 			progressSteps = append(progressSteps, progress.Step)
+			learningRates = append(learningRates, progress.LearningRate)
 			if progress.StepsPerSecond <= 0 {
 				t.Fatalf("steps/sec = %f, want positive", progress.StepsPerSecond)
 			}
@@ -129,6 +133,12 @@ func TestTrainingControlsMaxStepsAndProgress(t *testing.T) {
 	}
 	if len(progressSteps) != 3 {
 		t.Fatalf("progress callback count = %d, want 3", len(progressSteps))
+	}
+	if learningRates[0] >= learningRates[1] {
+		t.Fatalf("warmup learning rates = %v, want step 2 greater than step 1", learningRates)
+	}
+	if learningRates[2] >= learningRates[1] {
+		t.Fatalf("decay learning rates = %v, want step 3 less than step 2", learningRates)
 	}
 }
 

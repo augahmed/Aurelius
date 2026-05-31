@@ -94,8 +94,8 @@ func TestBuildTrainingSequences(t *testing.T) {
 func TestGenerateDatasetIncludesCurriculumMetadata(t *testing.T) {
 	dir := t.TempDir()
 	cfg := GenerateConfig{
-		TrainCount: 12,
-		ValCount:   6,
+		TrainCount: 36,
+		ValCount:   18,
 		Operations: []string{"add", "sub"},
 		Levels:     []int{1, 2, 3},
 		Seed:       11,
@@ -172,6 +172,209 @@ func TestGenerateDatasetFiltersSmallDifferenceSubtraction(t *testing.T) {
 		if !example.SmallDifference {
 			t.Fatalf("expected small difference metadata: %+v", example)
 		}
+	}
+}
+
+func TestGenerateDatasetFiltersQuestionTemplate(t *testing.T) {
+	dir := t.TempDir()
+	cfg := GenerateConfig{
+		TrainCount: 9,
+		ValCount:   3,
+		Operations: []string{"add", "sub"},
+		Levels:     []int{2},
+		Templates:  []string{"question"},
+		Seed:       23,
+	}
+	if err := GenerateDataset(dir, cfg); err != nil {
+		t.Fatalf("GenerateDataset error: %v", err)
+	}
+	train, err := LoadExamples(filepath.Join(dir, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples error: %v", err)
+	}
+	for _, example := range train {
+		if example.Template != "question" {
+			t.Fatalf("template = %q, want question: %+v", example.Template, example)
+		}
+		if !strings.HasPrefix(example.Prompt, "What is ") {
+			t.Fatalf("prompt = %q, want question prompt", example.Prompt)
+		}
+	}
+}
+
+func TestGenerateDatasetFiltersMultipleTemplates(t *testing.T) {
+	dir := t.TempDir()
+	cfg := GenerateConfig{
+		TrainCount: 12,
+		ValCount:   4,
+		Operations: []string{"add"},
+		Levels:     []int{1},
+		Templates:  []string{"equation", "solve"},
+		Seed:       29,
+	}
+	if err := GenerateDataset(dir, cfg); err != nil {
+		t.Fatalf("GenerateDataset error: %v", err)
+	}
+	train, err := LoadExamples(filepath.Join(dir, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples error: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, example := range train {
+		if example.Template == "question" {
+			t.Fatalf("unexpected question template: %+v", example)
+		}
+		seen[example.Template] = true
+	}
+	for _, template := range []string{"equation", "solve"} {
+		if !seen[template] {
+			t.Fatalf("missing template %q", template)
+		}
+	}
+}
+
+func TestGenerateDatasetFiltersTemplateWithAnswerShape(t *testing.T) {
+	dir := t.TempDir()
+	cfg := GenerateConfig{
+		TrainCount:          12,
+		ValCount:            4,
+		Operations:          []string{"sub"},
+		Levels:              []int{2},
+		Templates:           []string{"question"},
+		AnswerDigits:        []int{1},
+		SmallDifferenceOnly: true,
+		Seed:                31,
+	}
+	if err := GenerateDataset(dir, cfg); err != nil {
+		t.Fatalf("GenerateDataset error: %v", err)
+	}
+	train, err := LoadExamples(filepath.Join(dir, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples error: %v", err)
+	}
+	for _, example := range train {
+		if example.Template != "question" || example.AnswerDigits != 1 || !example.SmallDifference {
+			t.Fatalf("unexpected filtered example: %+v", example)
+		}
+	}
+}
+
+func TestGenerateDatasetWorkedReasoningStyle(t *testing.T) {
+	dir := t.TempDir()
+	cfg := GenerateConfig{
+		TrainCount:     12,
+		ValCount:       4,
+		Operations:     []string{"add", "sub"},
+		Levels:         []int{3},
+		Templates:      []string{"equation"},
+		ReasoningStyle: "worked",
+		Seed:           37,
+	}
+	if err := GenerateDataset(dir, cfg); err != nil {
+		t.Fatalf("GenerateDataset error: %v", err)
+	}
+	train, err := LoadExamples(filepath.Join(dir, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples error: %v", err)
+	}
+	for _, example := range train {
+		if example.ReasoningStyle != "worked" {
+			t.Fatalf("reasoning style = %q, want worked: %+v", example.ReasoningStyle, example)
+		}
+		if example.Answer == "" {
+			t.Fatalf("missing final answer: %+v", example)
+		}
+		if !strings.Contains(example.Completion, "answer: "+example.Answer) {
+			t.Fatalf("completion = %q, want answer marker %q", example.Completion, example.Answer)
+		}
+		if FinalAnswer(example) != example.Answer {
+			t.Fatalf("FinalAnswer = %q, want %q", FinalAnswer(example), example.Answer)
+		}
+		if !strings.Contains(example.Completion, "ones:") {
+			t.Fatalf("completion = %q, want worked digit step", example.Completion)
+		}
+	}
+}
+
+func TestGenerateDatasetCompactReasoningStyle(t *testing.T) {
+	dir := t.TempDir()
+	cfg := GenerateConfig{
+		TrainCount:     12,
+		ValCount:       4,
+		Operations:     []string{"add", "sub"},
+		Levels:         []int{3},
+		Templates:      []string{"equation"},
+		ReasoningStyle: "compact",
+		Seed:           41,
+	}
+	if err := GenerateDataset(dir, cfg); err != nil {
+		t.Fatalf("GenerateDataset error: %v", err)
+	}
+	train, err := LoadExamples(filepath.Join(dir, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples error: %v", err)
+	}
+	for _, example := range train {
+		if example.ReasoningStyle != "compact" {
+			t.Fatalf("reasoning style = %q, want compact: %+v", example.ReasoningStyle, example)
+		}
+		if example.Answer == "" {
+			t.Fatalf("missing final answer: %+v", example)
+		}
+		if !strings.Contains(example.Completion, "ans:"+example.Answer) {
+			t.Fatalf("completion = %q, want compact answer marker %q", example.Completion, example.Answer)
+		}
+		if FinalAnswer(example) != example.Answer {
+			t.Fatalf("FinalAnswer = %q, want %q", FinalAnswer(example), example.Answer)
+		}
+		if !strings.Contains(example.Completion, "o:") {
+			t.Fatalf("completion = %q, want compact digit step", example.Completion)
+		}
+	}
+}
+
+func TestExtractFinalAnswer(t *testing.T) {
+	tests := []struct {
+		text string
+		want string
+	}{
+		{text: "68", want: "68"},
+		{text: "ones: 7+1=8; tens: 5+1=6; answer: 68", want: "68"},
+		{text: "o:7+1=8; t:5+1=6; ans:68", want: "68"},
+		{text: "steps; Answer: 105 extra", want: "105"},
+	}
+	for _, test := range tests {
+		if got := ExtractFinalAnswer(test.text); got != test.want {
+			t.Fatalf("ExtractFinalAnswer(%q) = %q, want %q", test.text, got, test.want)
+		}
+	}
+}
+
+func TestGenerateDatasetRejectsInvalidTemplate(t *testing.T) {
+	err := GenerateDataset(t.TempDir(), GenerateConfig{
+		TrainCount: 4,
+		ValCount:   2,
+		Operations: []string{"add"},
+		Levels:     []int{1},
+		Templates:  []string{"story"},
+		Seed:       1,
+	})
+	if err == nil {
+		t.Fatal("expected invalid template error")
+	}
+}
+
+func TestGenerateDatasetRejectsInvalidReasoningStyle(t *testing.T) {
+	err := GenerateDataset(t.TempDir(), GenerateConfig{
+		TrainCount:     4,
+		ValCount:       2,
+		Operations:     []string{"add"},
+		Levels:         []int{1},
+		ReasoningStyle: "proof",
+		Seed:           1,
+	})
+	if err == nil {
+		t.Fatal("expected invalid reasoning style error")
 	}
 }
 

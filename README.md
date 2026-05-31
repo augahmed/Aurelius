@@ -74,6 +74,7 @@ go run ./cmd/aurelius validate-gpt2 -model-config /path/to/config.json -weights 
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic -levels 1,2,3,4,5
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l2-small-sub -operations sub -levels 2 -answer-digits 1 -small-difference-only
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l2-question -operations add,sub -levels 2 -templates question
+go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l3-worked -operations add,sub -levels 3 -reasoning-style worked
 go run ./cmd/aurelius mix-math-data -output-dir ./data/arithmetic-l2-replay -inputs ./data/arithmetic-l2-transformer:1,./data/arithmetic-l2-small-sub:2
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l3-transformer -operations add,sub -levels 3
 go run ./cmd/aurelius train-math -data-dir ./data/arithmetic -checkpoint ./artifacts/mathlm.json
@@ -119,9 +120,10 @@ Aurelius now includes a student-scale from-scratch training path for arithmetic.
 - synthetic arithmetic JSONL datasets with curriculum metadata
 - the existing byte tokenizer for a minimal training-first path
 - `train-math -model mlp` for the original fixed-context autoregressive MLP language model
-- `train-math -model transformer` for a one-layer causal decoder transformer with manual full-path backpropagation
+- `train-math -model transformer` for a configurable-depth causal decoder transformer with manual full-path backpropagation
 - JSON checkpoints for save/resume
-- step-limited training, progress logging, periodic checkpoints, and gradient clipping for longer curriculum runs
+- step-limited training, progress logging, periodic checkpoints, gradient clipping, and learning-rate warmup/decay for longer curriculum runs
+- direct-answer, worked-solution, or compact worked completions via `gen-math-data -reasoning-style direct|worked|compact`
 - exact-match evaluation on held-out arithmetic prompts, grouped by operation and curriculum level
 
 This path is intentionally small and educational. It is not a frontier LLM training stack and it does not replace the existing GPT-2 inference path.
@@ -131,14 +133,15 @@ Curriculum levels let you scale data difficulty without changing the model first
 ```bash
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l1 -operations add,sub -levels 1
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l1-l3 -operations add,sub -levels 1,2,3
+go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l3-worked -operations add,sub -levels 3 -reasoning-style worked
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-word -operations word -levels 6
-go run ./cmd/aurelius train-math -model transformer -data-dir ./data/arithmetic-l1 -checkpoint ./artifacts/math-transformer-l1.json -num-heads 4 -epochs 25 -batch-size 32 -learning-rate 0.003
+go run ./cmd/aurelius train-math -model transformer -data-dir ./data/arithmetic-l1 -checkpoint ./artifacts/math-transformer-l1.json -num-heads 4 -num-layers 2 -epochs 25 -batch-size 32 -learning-rate 0.003 -warmup-steps 100 -decay-steps 2000 -min-learning-rate 0.0003
 ```
 
 For larger curriculum runs, prefer bounded smoke runs before committing to a long training job:
 
 ```bash
-go run ./cmd/aurelius train-math -model transformer -data-dir ./data/arithmetic-l1-l3 -checkpoint ./artifacts/math-transformer-curriculum.json -num-heads 4 -epochs 50 -batch-size 32 -learning-rate 0.003 -max-steps 2000 -log-every 100 -save-every 1000 -grad-clip 1
+go run ./cmd/aurelius train-math -model transformer -data-dir ./data/arithmetic-l1-l3 -checkpoint ./artifacts/math-transformer-curriculum.json -num-heads 4 -num-layers 2 -epochs 50 -batch-size 32 -learning-rate 0.003 -warmup-steps 200 -decay-steps 5000 -min-learning-rate 0.0003 -max-steps 2000 -log-every 100 -save-every 1000 -grad-clip 1
 go run ./cmd/aurelius train-math -model transformer -data-dir ./data/arithmetic-l1-l3 -checkpoint ./artifacts/math-transformer-curriculum.json -resume ./artifacts/math-transformer-curriculum.json -epochs 50 -batch-size 32 -learning-rate 0.003 -max-steps 2000 -log-every 100 -save-every 1000 -grad-clip 1
 ```
 

@@ -47,6 +47,7 @@ type EvalError struct {
 	RequiresBorrow  bool   `json:"requires_borrow"`
 	MinOperand      int    `json:"min_operand"`
 	MaxOperand      int    `json:"max_operand"`
+	ReasoningStyle  string `json:"reasoning_style,omitempty"`
 }
 
 func EvaluateExamples(model sharedmodel.Model, examples []arithmetic.Example, maxTokens int) (EvalReport, error) {
@@ -85,9 +86,10 @@ func EvaluateExamplesWithOptions(model sharedmodel.Model, examples []arithmetic.
 		if err != nil {
 			return EvalReport{}, err
 		}
-		generated := strings.TrimSpace(strings.TrimPrefix(output, example.Prompt))
-		expected := strings.TrimSpace(example.Completion)
-		correct := generated == expected
+		generated := generatedCompletion(output, example.Prompt)
+		expected := arithmetic.FinalAnswer(example)
+		generatedAnswer := arithmetic.ExtractFinalAnswer(generated)
+		correct := generatedAnswer == expected
 		if correct {
 			report.Correct++
 		}
@@ -101,7 +103,7 @@ func EvaluateExamplesWithOptions(model sharedmodel.Model, examples []arithmetic.
 				report.Errors = append(report.Errors, EvalError{
 					Prompt:          example.Prompt,
 					Expected:        expected,
-					Generated:       generated,
+					Generated:       generatedAnswer,
 					Operation:       example.Operation,
 					Level:           example.Level,
 					Template:        example.Template,
@@ -111,6 +113,7 @@ func EvaluateExamplesWithOptions(model sharedmodel.Model, examples []arithmetic.
 					RequiresBorrow:  example.RequiresBorrow,
 					MinOperand:      example.MinOperand,
 					MaxOperand:      example.MaxOperand,
+					ReasoningStyle:  example.ReasoningStyle,
 				})
 			}
 		}
@@ -119,6 +122,10 @@ func EvaluateExamplesWithOptions(model sharedmodel.Model, examples []arithmetic.
 		report.Accuracy = float64(report.Correct) / float64(report.Total)
 	}
 	return report, nil
+}
+
+func generatedCompletion(output, prompt string) string {
+	return strings.TrimSpace(strings.TrimPrefix(output, prompt))
 }
 
 func boolGroupKey(value bool) string {

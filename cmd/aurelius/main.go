@@ -113,6 +113,7 @@ func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int 
 	operations := flags.String("operations", "add,sub,mul,div", "comma-separated operations: add,sub,mul,div,word")
 	levels := flags.String("levels", "1,2,3,4,5", "comma-separated curriculum levels: 1,2,3,4,5,6")
 	templates := flags.String("templates", "all", "comma-separated templates: equation,question,solve, or all")
+	reasoningStyle := flags.String("reasoning-style", "direct", "completion style: direct, worked, or compact")
 	answerDigits := flags.String("answer-digits", "", "optional comma-separated answer digit buckets, for example 1,2")
 	smallDifferenceOnly := flags.Bool("small-difference-only", false, "only generate subtraction examples with one-digit differences")
 	seed := flags.Int64("seed", 1, "random seed")
@@ -149,6 +150,7 @@ func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int 
 		Operations:          splitCSV(*operations),
 		Levels:              parsedLevels,
 		Templates:           parsedTemplates,
+		ReasoningStyle:      *reasoningStyle,
 		AnswerDigits:        parsedAnswerDigits,
 		SmallDifferenceOnly: *smallDifferenceOnly,
 		Seed:                *seed,
@@ -205,13 +207,21 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	embeddingDim := flags.Int("embedding-dim", 32, "embedding size")
 	hiddenDim := flags.Int("hidden-dim", 128, "hidden size")
 	numHeads := flags.Int("num-heads", 1, "attention heads for -model transformer")
+	numLayers := flags.Int("num-layers", 1, "decoder layers for -model transformer")
 	epochs := flags.Int("epochs", 10, "number of training epochs")
 	batchSize := flags.Int("batch-size", 64, "batch size")
 	learningRate := flags.Float64("learning-rate", 0.01, "optimizer learning rate")
+	warmupSteps := flags.Int("warmup-steps", 0, "linearly warm learning rate over this many global optimizer steps; 0 disables")
+	decaySteps := flags.Int("decay-steps", 0, "linearly decay learning rate after warmup over this many global optimizer steps; 0 disables")
+	minLearningRate := flags.Float64("min-learning-rate", 0, "minimum learning rate after decay")
 	maxSteps := flags.Int("max-steps", 0, "optional maximum optimizer steps for this run; 0 disables")
 	logEvery := flags.Int("log-every", 0, "print training progress every N optimizer steps; 0 disables")
 	saveEvery := flags.Int("save-every", 0, "write periodic checkpoints every N optimizer steps; 0 disables")
 	gradClip := flags.Float64("grad-clip", 0, "clip gradients by global norm before Adam; 0 disables")
+	trainLimit := flags.Int("train-limit", 0, "optional cap on loaded training examples before sequence expansion; 0 disables")
+	valLimit := flags.Int("val-limit", 0, "optional cap on loaded validation examples for loss and accuracy checks; 0 disables")
+	skipAccuracyEval := flags.Bool("skip-accuracy-eval", false, "skip before/after generative validation accuracy checks")
+	skipLossEval := flags.Bool("skip-loss-eval", false, "skip final full-dataset train and validation loss passes")
 	seed := flags.Int64("seed", 1, "random seed")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "parse flags: %v\n", err)
@@ -220,6 +230,10 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	if *dataDir == "" || *checkpointPath == "" {
 		fmt.Fprintln(stderr, "data-dir and checkpoint are required")
 		flags.Usage()
+		return 1
+	}
+	if *trainLimit < 0 || *valLimit < 0 {
+		fmt.Fprintln(stderr, "train-limit and val-limit cannot be negative")
 		return 1
 	}
 	contextSizeSet := false
@@ -234,6 +248,8 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "load dataset: %v\n", err)
 		return 1
 	}
+	trainExamples = limitExamples(trainExamples, *trainLimit)
+	valExamples = limitExamples(valExamples, *valLimit)
 	tok := tokenizer.NewByteTokenizer()
 	trainer, err := loadOrCreateAnyMathTrainer(*resumePath, *modelType, mathlm.Config{
 		VocabSize:    tok.VocabSize(),
@@ -246,6 +262,7 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		ContextSize:  *contextSize,
 		EmbeddingDim: *embeddingDim,
 		NumHeads:     *numHeads,
+		NumLayers:    *numLayers,
 		MLPDim:       *hiddenDim,
 		Seed:         *seed,
 	})
@@ -273,27 +290,36 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 
-	before, err := mathlm.EvaluateExamples(trainer.Model(), valExamples, maxCompletionTokens(valExamples))
-	if err != nil {
-		fmt.Fprintf(stderr, "evaluate before training: %v\n", err)
-		return 1
+	var before mathlm.EvalReport
+	if !*skipAccuracyEval {
+		before, err = mathlm.EvaluateExamples(trainer.Model(), valExamples, maxCompletionTokens(valExamples))
+		if err != nil {
+			fmt.Fprintf(stderr, "evaluate before training: %v\n", err)
+			return 1
+		}
 	}
 	report, err := trainer.Train(trainSeq, valSeq, mathlm.TrainingConfig{
-		Epochs:       *epochs,
-		BatchSize:    *batchSize,
-		LearningRate: *learningRate,
-		Beta1:        0.9,
-		Beta2:        0.999,
-		Epsilon:      1e-8,
-		Seed:         *seed,
-		MaxSteps:     *maxSteps,
-		LogEvery:     *logEvery,
-		SaveEvery:    *saveEvery,
-		GradClip:     *gradClip,
+		Epochs:             *epochs,
+		BatchSize:          *batchSize,
+		LearningRate:       *learningRate,
+		WarmupSteps:        *warmupSteps,
+		DecaySteps:         *decaySteps,
+		MinLearningRate:    *minLearningRate,
+		Beta1:              0.9,
+		Beta2:              0.999,
+		Epsilon:            1e-8,
+		Seed:               *seed,
+		MaxSteps:           *maxSteps,
+		LogEvery:           *logEvery,
+		SaveEvery:          *saveEvery,
+		GradClip:           *gradClip,
+		SkipFinalTrainLoss: *skipLossEval,
+		SkipValidationLoss: *skipLossEval,
 		OnProgress: func(progress mathlm.TrainingProgress) error {
-			fmt.Fprintf(stdout, "step=%d train_loss=%.4f elapsed=%s steps_per_sec=%.2f\n",
+			fmt.Fprintf(stdout, "step=%d train_loss=%.4f learning_rate=%.6g elapsed=%s steps_per_sec=%.2f\n",
 				progress.Step,
 				progress.Loss,
+				progress.LearningRate,
 				progress.Elapsed.Truncate(time.Millisecond),
 				progress.StepsPerSecond,
 			)
@@ -312,10 +338,13 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "train model: %v\n", err)
 		return 1
 	}
-	after, err := mathlm.EvaluateExamples(trainer.Model(), valExamples, maxCompletionTokens(valExamples))
-	if err != nil {
-		fmt.Fprintf(stderr, "evaluate after training: %v\n", err)
-		return 1
+	var after mathlm.EvalReport
+	if !*skipAccuracyEval {
+		after, err = mathlm.EvaluateExamples(trainer.Model(), valExamples, maxCompletionTokens(valExamples))
+		if err != nil {
+			fmt.Fprintf(stderr, "evaluate after training: %v\n", err)
+			return 1
+		}
 	}
 	if err := mathlm.SaveAnyCheckpoint(*checkpointPath, trainer); err != nil {
 		fmt.Fprintf(stderr, "save checkpoint: %v\n", err)
@@ -323,7 +352,11 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	}
 
 	fmt.Fprintf(stdout, "model=%s train_loss=%.4f val_loss=%.4f steps=%d\n", trainer.ModelType, report.TrainLoss, report.ValLoss, report.Steps)
-	fmt.Fprintf(stdout, "val_accuracy_before=%.4f val_accuracy_after=%.4f\n", before.Accuracy, after.Accuracy)
+	if *skipAccuracyEval {
+		fmt.Fprintln(stdout, "val_accuracy=skipped")
+	} else {
+		fmt.Fprintf(stdout, "val_accuracy_before=%.4f val_accuracy_after=%.4f\n", before.Accuracy, after.Accuracy)
+	}
 	fmt.Fprintf(stdout, "checkpoint=%s\n", *checkpointPath)
 	return 0
 }
@@ -337,6 +370,7 @@ func runEvalMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	maxTokens := flags.Int("max-tokens", 0, "max completion tokens; defaults to dataset-driven value")
 	showErrors := flags.Int("show-errors", 0, "print up to N incorrect examples with metadata")
 	errorsOut := flags.String("errors-out", "", "write all incorrect examples and grouped template counts as JSON")
+	exampleLimit := flags.Int("limit", 0, "optional cap on loaded evaluation examples; 0 disables")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "parse flags: %v\n", err)
 		return 2
@@ -344,6 +378,10 @@ func runEvalMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	if *checkpointPath == "" || *dataPath == "" {
 		fmt.Fprintln(stderr, "checkpoint and data are required")
 		flags.Usage()
+		return 1
+	}
+	if *exampleLimit < 0 {
+		fmt.Fprintln(stderr, "limit cannot be negative")
 		return 1
 	}
 
@@ -357,12 +395,13 @@ func runEvalMath(args []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "load examples: %v\n", err)
 		return 1
 	}
-	limit := *maxTokens
-	if limit <= 0 {
-		limit = maxCompletionTokens(examples)
+	examples = limitExamples(examples, *exampleLimit)
+	tokenLimit := *maxTokens
+	if tokenLimit <= 0 {
+		tokenLimit = maxCompletionTokens(examples)
 	}
 	collectErrors := *showErrors > 0 || *errorsOut != ""
-	report, err := mathlm.EvaluateExamplesWithOptions(trainer.Model(), examples, limit, mathlm.EvalOptions{
+	report, err := mathlm.EvaluateExamplesWithOptions(trainer.Model(), examples, tokenLimit, mathlm.EvalOptions{
 		CollectErrors: collectErrors,
 	})
 	if err != nil {
@@ -1045,7 +1084,7 @@ func writeEvalDebugReport(stdout io.Writer, report mathlm.EvalReport, showErrors
 	limit := min(showErrors, len(report.Errors))
 	for i := 0; i < limit; i++ {
 		err := report.Errors[i]
-		fmt.Fprintf(stdout, "error[%d] prompt=%q expected=%q generated=%q operation=%s level=%d template=%s answer_digits=%d small_difference=%t carry=%t borrow=%t operands=%d..%d\n",
+		fmt.Fprintf(stdout, "error[%d] prompt=%q expected=%q generated=%q operation=%s level=%d template=%s reasoning_style=%s answer_digits=%d small_difference=%t carry=%t borrow=%t operands=%d..%d\n",
 			i+1,
 			err.Prompt,
 			err.Expected,
@@ -1053,6 +1092,7 @@ func writeEvalDebugReport(stdout io.Writer, report mathlm.EvalReport, showErrors
 			err.Operation,
 			err.Level,
 			err.Template,
+			err.ReasoningStyle,
 			err.AnswerDigits,
 			err.SmallDifference,
 			err.RequiresCarry,
@@ -1132,6 +1172,13 @@ func loadArithmeticDatasets(dataDir string) ([]arithmetic.Example, []arithmetic.
 		return nil, nil, err
 	}
 	return train, val, nil
+}
+
+func limitExamples(examples []arithmetic.Example, limit int) []arithmetic.Example {
+	if limit <= 0 || limit >= len(examples) {
+		return examples
+	}
+	return examples[:limit]
 }
 
 func loadOrCreateMathTrainer(resumePath string, cfg mathlm.Config) (*mathlm.Trainer, error) {
