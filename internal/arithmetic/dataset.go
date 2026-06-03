@@ -88,10 +88,10 @@ type generationTask struct {
 	Template  string
 }
 
-var supportedOperations = []string{"add", "sub", "mul", "div", "word"}
-var supportedLevels = []int{1, 2, 3, 4, 5, 6}
+var supportedOperations = []string{"add", "sub", "mul", "div", "word", "derivative"}
+var supportedLevels = []int{1, 2, 3, 4, 5, 6, 7}
 var supportedTemplates = []string{"equation", "question", "solve"}
-var supportedReasoningStyles = []string{"direct", "worked", "compact"}
+var supportedReasoningStyles = []string{"direct", "worked", "compact", "coefficients"}
 
 func (c GenerateConfig) Validate() error {
 	if c.TrainCount <= 0 {
@@ -137,6 +137,12 @@ func (c GenerateConfig) Validate() error {
 	reasoningStyle := reasoningStyleOrDefault(c.ReasoningStyle)
 	if !slices.Contains(supportedReasoningStyles, reasoningStyle) {
 		return fmt.Errorf("unsupported reasoning style %q", c.ReasoningStyle)
+	}
+	taskCfg := c
+	taskCfg.Levels = levels
+	taskCfg.Templates = templates
+	if len(buildGenerationTasks(taskCfg)) == 0 {
+		return fmt.Errorf("no compatible generation tasks for levels %v, operations %v, templates %v", levels, c.Operations, templates)
 	}
 	if c.SmallDifferenceOnly && !slices.Contains(c.Operations, "sub") {
 		return fmt.Errorf("small difference filtering requires subtraction examples")
@@ -443,7 +449,7 @@ func buildGenerationTasks(cfg GenerateConfig) []generationTask {
 	tasks := make([]generationTask, 0)
 	for _, level := range cfg.Levels {
 		for _, operation := range compatibleOperations(level, cfg.Operations) {
-			for _, template := range cfg.Templates {
+			for _, template := range compatibleTemplates(operation, cfg.Templates) {
 				tasks = append(tasks, generationTask{
 					Level:     level,
 					Operation: operation,
@@ -470,6 +476,9 @@ func generateExampleForTask(cfg GenerateConfig, task generationTask, rng *rand.R
 }
 
 func generateCandidateForTask(cfg GenerateConfig, task generationTask, rng *rand.Rand) Example {
+	if task.Level == 7 {
+		return generateDerivativeExample(task.Template, cfg.ReasoningStyle, rng)
+	}
 	left, right, answer, requiresCarry, requiresBorrow := operandsForLevel(task.Operation, task.Level, cfg.MinOperand, cfg.MaxOperand, rng)
 	answerText := fmt.Sprintf("%d", answer)
 	example := Example{
@@ -503,7 +512,7 @@ func generateCandidateForTask(cfg GenerateConfig, task generationTask, rng *rand
 
 func completionForReasoningStyle(operation string, left, right, answer int, reasoningStyle string) string {
 	switch reasoningStyleOrDefault(reasoningStyle) {
-	case "direct":
+	case "direct", "coefficients":
 		return fmt.Sprintf("%d", answer)
 	case "compact":
 		return compactCompletion(operation, left, right, answer)
@@ -713,7 +722,7 @@ func generateWordExample(left, right int, reasoningStyle string, rng *rand.Rand)
 
 func wordCompletion(left, right, extra, answer int, pattern, reasoningStyle string) string {
 	switch reasoningStyleOrDefault(reasoningStyle) {
-	case "direct":
+	case "direct", "coefficients":
 		return fmt.Sprintf("%d", answer)
 	case "compact":
 		sum := left + right
@@ -729,6 +738,92 @@ func wordCompletion(left, right, extra, answer int, pattern, reasoningStyle stri
 	return fmt.Sprintf("first: %d+%d=%d; then: %d-%d=%d; answer: %d", left, right, sum, sum, extra, answer, answer)
 }
 
+func generateDerivativeExample(template, reasoningStyle string, rng *rand.Rand) Example {
+	expression, polynomialAnswer, coefficientAnswer := derivativeExpression(rng)
+	answer := derivativeAnswerForReasoningStyle(polynomialAnswer, coefficientAnswer, reasoningStyle)
+	prompt := fmt.Sprintf("Derrivative: %s ", expression)
+	if template == "question" {
+		prompt = fmt.Sprintf("What is the derrivative of %s? ", expression)
+	}
+	return Example{
+		Prompt:         prompt,
+		Completion:     derivativeCompletion(expression, answer, reasoningStyle),
+		Answer:         answer,
+		Operation:      "derivative",
+		Level:          7,
+		MinOperand:     1,
+		MaxOperand:     9,
+		AnswerDigits:   digitCharacters(answer),
+		Template:       template,
+		ReasoningStyle: reasoningStyleOrDefault(reasoningStyle),
+	}
+}
+
+func derivativeExpression(rng *rand.Rand) (string, string, string) {
+	degree := randomOperand(1, 3, rng)
+	coefficients := make([]int, degree+1)
+	for power := 0; power <= degree; power++ {
+		coefficients[power] = randomOperand(1, 9, rng)
+	}
+	expressionTerms := make([]string, 0, degree+1)
+	derivativeTerms := make([]string, 0, degree)
+	derivativeCoefficients := make([]string, 0, degree)
+	for power := degree; power >= 0; power-- {
+		expressionTerms = append(expressionTerms, formatPolynomialTerm(coefficients[power], power))
+		if power > 0 {
+			derivativeCoefficient := coefficients[power] * power
+			derivativeTerms = append(derivativeTerms, formatPolynomialTerm(derivativeCoefficient, power-1))
+			derivativeCoefficients = append(derivativeCoefficients, fmt.Sprintf("%d", derivativeCoefficient))
+		}
+	}
+	return strings.Join(expressionTerms, " + "), strings.Join(derivativeTerms, " + "), strings.Join(derivativeCoefficients, ",")
+}
+
+func derivativeAnswerForReasoningStyle(polynomialAnswer, coefficientAnswer, reasoningStyle string) string {
+	if reasoningStyleOrDefault(reasoningStyle) == "coefficients" {
+		return coefficientAnswer
+	}
+	return polynomialAnswer
+}
+
+func derivativeCompletion(expression, answer, reasoningStyle string) string {
+	switch reasoningStyleOrDefault(reasoningStyle) {
+	case "direct", "coefficients":
+		return answer
+	case "compact":
+		return fmt.Sprintf("d:%s; ans:%s", expression, answer)
+	default:
+		return fmt.Sprintf("derivative: d/dx %s = %s; answer: %s", expression, answer, answer)
+	}
+}
+
+func formatPolynomialTerm(coefficient, power int) string {
+	switch power {
+	case 0:
+		return fmt.Sprintf("%d", coefficient)
+	case 1:
+		if coefficient == 1 {
+			return "x"
+		}
+		return fmt.Sprintf("%dx", coefficient)
+	default:
+		if coefficient == 1 {
+			return fmt.Sprintf("x^%d", power)
+		}
+		return fmt.Sprintf("%dx^%d", coefficient, power)
+	}
+}
+
+func digitCharacters(value string) int {
+	count := 0
+	for _, char := range value {
+		if char >= '0' && char <= '9' {
+			count++
+		}
+	}
+	return max(1, count)
+}
+
 func compatibleOperations(level int, requested []string) []string {
 	allowed := map[int][]string{
 		1: []string{"add", "sub"},
@@ -737,6 +832,7 @@ func compatibleOperations(level int, requested []string) []string {
 		4: []string{"mul"},
 		5: []string{"div"},
 		6: []string{"word"},
+		7: []string{"derivative"},
 	}
 	out := make([]string, 0)
 	for _, operation := range requested {
@@ -747,10 +843,23 @@ func compatibleOperations(level int, requested []string) []string {
 	return out
 }
 
+func compatibleTemplates(operation string, requested []string) []string {
+	if operation != "derivative" {
+		return append([]string(nil), requested...)
+	}
+	out := make([]string, 0, 2)
+	for _, template := range requested {
+		if template == "equation" || template == "question" {
+			out = append(out, template)
+		}
+	}
+	return out
+}
+
 func levelsOrDefault(levels []int, operations []string) []int {
 	if len(levels) == 0 {
-		defaults := make([]int, 0, 5)
-		for _, level := range []int{1, 2, 3, 4, 5, 6} {
+		defaults := make([]int, 0, 7)
+		for _, level := range []int{1, 2, 3, 4, 5, 6, 7} {
 			if len(compatibleOperations(level, operations)) > 0 {
 				defaults = append(defaults, level)
 			}
@@ -783,6 +892,8 @@ func minOperandForLevel(level, fallback int) int {
 		return 10
 	case 5, 6:
 		return 1
+	case 7:
+		return 1
 	default:
 		return fallback
 	}
@@ -798,6 +909,8 @@ func maxOperandForLevel(level, fallback int) int {
 		return 12
 	case 6:
 		return 20
+	case 7:
+		return 9
 	default:
 		return fallback
 	}
@@ -835,6 +948,8 @@ func symbolForOperation(operation string) string {
 		return "*"
 	case "div":
 		return "/"
+	case "derivative":
+		return "d/dx"
 	default:
 		return "?"
 	}

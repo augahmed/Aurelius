@@ -1,6 +1,7 @@
 package mathlm
 
 import (
+	"math"
 	"path/filepath"
 	"testing"
 
@@ -139,6 +140,28 @@ func TestTrainingControlsMaxStepsAndProgress(t *testing.T) {
 	}
 	if learningRates[2] >= learningRates[1] {
 		t.Fatalf("decay learning rates = %v, want step 3 less than step 2", learningRates)
+	}
+}
+
+func TestEffectiveLearningRateIsRunRelative(t *testing.T) {
+	cfg := TrainingConfig{
+		LearningRate:       0.01,
+		WarmupSteps:        2,
+		DecaySteps:         2,
+		MinLearningRate:    0.001,
+		scheduleStepOffset: 10,
+	}
+	want := map[int]float64{
+		11: 0.005,
+		12: 0.01,
+		13: 0.0055,
+		14: 0.001,
+		20: 0.001,
+	}
+	for step, expected := range want {
+		if got := effectiveLearningRate(cfg, step); math.Abs(got-expected) > 1e-12 {
+			t.Fatalf("effectiveLearningRate(step=%d) = %g, want %g", step, got, expected)
+		}
 	}
 }
 

@@ -333,6 +333,145 @@ func TestGenerateDatasetCompactReasoningStyle(t *testing.T) {
 	}
 }
 
+func TestGenerateDatasetDerivativeLevel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := GenerateConfig{
+		TrainCount: 12,
+		ValCount:   4,
+		Operations: []string{"derivative"},
+		Levels:     []int{7},
+		Templates:  []string{"equation", "question"},
+		Seed:       43,
+	}
+	if err := GenerateDataset(dir, cfg); err != nil {
+		t.Fatalf("GenerateDataset error: %v", err)
+	}
+	train, err := LoadExamples(filepath.Join(dir, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples error: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, example := range train {
+		if example.Operation != "derivative" || example.Level != 7 {
+			t.Fatalf("unexpected derivative example: %+v", example)
+		}
+		if example.Template != "equation" && example.Template != "question" {
+			t.Fatalf("template = %q, want equation or question", example.Template)
+		}
+		if example.Template == "equation" && !strings.HasPrefix(example.Prompt, "Derrivative: ") {
+			t.Fatalf("prompt = %q, want Derrivative frame", example.Prompt)
+		}
+		if example.Template == "question" && !strings.HasPrefix(example.Prompt, "What is the derrivative of ") {
+			t.Fatalf("prompt = %q, want derrivative question frame", example.Prompt)
+		}
+		if !strings.Contains(example.Prompt, "x") {
+			t.Fatalf("prompt = %q, want polynomial expression", example.Prompt)
+		}
+		if example.Answer == "" || example.Completion != example.Answer {
+			t.Fatalf("completion/answer mismatch: %+v", example)
+		}
+		seen[example.Template] = true
+	}
+	for _, template := range []string{"equation", "question"} {
+		if !seen[template] {
+			t.Fatalf("missing derivative template %q", template)
+		}
+	}
+}
+
+func TestGenerateDatasetDerivativeFiltersAnswerDigits(t *testing.T) {
+	dir := t.TempDir()
+	cfg := GenerateConfig{
+		TrainCount:   20,
+		ValCount:     8,
+		Operations:   []string{"derivative"},
+		Levels:       []int{7},
+		Templates:    []string{"equation", "question"},
+		AnswerDigits: []int{1, 2},
+		Seed:         47,
+	}
+	if err := GenerateDataset(dir, cfg); err != nil {
+		t.Fatalf("GenerateDataset error: %v", err)
+	}
+	train, err := LoadExamples(filepath.Join(dir, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples error: %v", err)
+	}
+	for _, example := range train {
+		if example.Operation != "derivative" || example.Level != 7 {
+			t.Fatalf("unexpected derivative example: %+v", example)
+		}
+		if example.AnswerDigits != 1 && example.AnswerDigits != 2 {
+			t.Fatalf("answer digits = %d, want 1 or 2: %+v", example.AnswerDigits, example)
+		}
+	}
+}
+
+func TestGenerateDatasetDerivativeCoefficientReasoningStyle(t *testing.T) {
+	dir := t.TempDir()
+	cfg := GenerateConfig{
+		TrainCount:     20,
+		ValCount:       8,
+		Operations:     []string{"derivative"},
+		Levels:         []int{7},
+		Templates:      []string{"equation", "question"},
+		ReasoningStyle: "coefficients",
+		Seed:           53,
+	}
+	if err := GenerateDataset(dir, cfg); err != nil {
+		t.Fatalf("GenerateDataset error: %v", err)
+	}
+	train, err := LoadExamples(filepath.Join(dir, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples error: %v", err)
+	}
+	seenComma := false
+	for _, example := range train {
+		if example.Operation != "derivative" || example.Level != 7 {
+			t.Fatalf("unexpected derivative example: %+v", example)
+		}
+		if example.ReasoningStyle != "coefficients" {
+			t.Fatalf("reasoning style = %q, want coefficients: %+v", example.ReasoningStyle, example)
+		}
+		if example.Completion != example.Answer {
+			t.Fatalf("completion/answer mismatch: %+v", example)
+		}
+		if strings.ContainsAny(example.Answer, "x^+ ") {
+			t.Fatalf("answer = %q, want coefficient vector", example.Answer)
+		}
+		for _, part := range strings.Split(example.Answer, ",") {
+			if part == "" {
+				t.Fatalf("answer = %q, has empty coefficient", example.Answer)
+			}
+			for _, char := range part {
+				if char < '0' || char > '9' {
+					t.Fatalf("answer = %q, want digits and commas only", example.Answer)
+				}
+			}
+		}
+		if strings.Contains(example.Answer, ",") {
+			seenComma = true
+		}
+	}
+	if !seenComma {
+		t.Fatal("expected at least one multi-coefficient derivative answer")
+	}
+}
+
+func TestGenerateDatasetDerivativeRejectsSolveOnly(t *testing.T) {
+	err := GenerateDataset(t.TempDir(), GenerateConfig{
+		TrainCount: 4,
+		ValCount:   2,
+		Operations: []string{"derivative"},
+		Levels:     []int{7},
+		Templates:  []string{"solve"},
+		Seed:       1,
+	})
+	if err == nil {
+		t.Fatal("expected derivative solve-only generation error")
+	}
+}
+
 func TestExtractFinalAnswer(t *testing.T) {
 	tests := []struct {
 		text string

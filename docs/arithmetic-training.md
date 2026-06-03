@@ -34,7 +34,7 @@ The generator writes:
 
 `meta.json` records operand ranges, split sizes, enabled operations, enabled curriculum levels, answer filters, seed, and tokenizer choice.
 
-`-reasoning-style direct` keeps completions as final answers only. `-reasoning-style worked` writes digit-level solution steps and stores the final answer separately in `answer`. `-reasoning-style compact` writes a shorter digit-step trace with an `ans:` marker, which is useful for tiny models because it reduces formatting tokens while preserving intermediate supervision. Evaluation extracts the value after `answer:` or `ans:` so worked examples are scored by the final answer instead of requiring the full explanation text to match exactly.
+`-reasoning-style direct` keeps completions as final answers only. `-reasoning-style worked` writes digit-level solution steps and stores the final answer separately in `answer`. `-reasoning-style compact` writes a shorter digit-step trace with an `ans:` marker, which is useful for tiny models because it reduces formatting tokens while preserving intermediate supervision. `-reasoning-style coefficients` is intended for derivative data and emits derivative coefficient vectors such as `21,16,8` instead of formatted polynomial strings such as `21x^2 + 16x + 8`. Evaluation extracts the value after `answer:` or `ans:` so worked examples are scored by the final answer instead of requiring the full explanation text to match exactly.
 
 ## Curriculum Levels
 
@@ -46,8 +46,11 @@ The generator supports explicit levels:
 - `4`: small multiplication tables
 - `5`: exact integer division
 - `6`: simple two-step word problems
+- `7`: simple polynomial derivatives
 
 Each generated example includes metadata such as `level`, `operation`, `answer_digits`, `small_difference`, `requires_carry`, `requires_borrow`, and `template`. Train and validation data cycle through compatible level/operation pairs before shuffling, so held-out examples preserve the same coverage for grouped metrics.
+
+Level `7` uses `operation=derivative` and emits two prompt frames: `Derrivative: [equation]` and `What is the derrivative of [equation]?`. The spelling is intentionally fixed to the prompt style used in the data. For higher derivative accuracy, prefer `-reasoning-style coefficients` and render the coefficient vector back into polynomial display form in the UI.
 
 Target known weak spots with answer-shape filters:
 
@@ -135,6 +138,34 @@ go run ./cmd/aurelius gen-math-data \
   -templates all \
   -reasoning-style compact \
   -seed 63
+```
+
+Generate derivative prompts:
+
+```bash
+go run ./cmd/aurelius gen-math-data \
+  -output-dir ./data/arithmetic-l7-derivative \
+  -train-count 12000 \
+  -val-count 1000 \
+  -operations derivative \
+  -levels 7 \
+  -templates all \
+  -reasoning-style direct \
+  -seed 70
+```
+
+Generate derivative coefficient-vector prompts:
+
+```bash
+go run ./cmd/aurelius gen-math-data \
+  -output-dir ./data/arithmetic-l7-derivative-coeff \
+  -train-count 12000 \
+  -val-count 1000 \
+  -operations derivative \
+  -levels 7 \
+  -templates all \
+  -reasoning-style coefficients \
+  -seed 71
 ```
 
 ## Training Workflow
@@ -339,6 +370,7 @@ Use these grouped metrics to decide when to add harder levels. A practical start
 4. add multiplication with level `4`
 5. add division with level `5`
 6. add word problems with level `6`
+7. add derivative prompts with level `7`
 
 Training uses each prompt as context and optimizes only the answer plus trailing newline. This keeps the small model focused on answer prediction instead of spending most updates learning to reproduce prompt text.
 

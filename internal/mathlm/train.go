@@ -28,6 +28,8 @@ type TrainingConfig struct {
 	SkipValidationLoss bool
 	OnProgress         func(TrainingProgress) error
 	OnCheckpoint       func(step int) error
+
+	scheduleStepOffset int
 }
 
 type TrainingReport struct {
@@ -149,32 +151,34 @@ func (t *Trainer) Train(train, val []arithmetic.SequenceExample, cfg TrainingCon
 	}
 
 	startStep := t.Step
+	runCfg := cfg
+	runCfg.scheduleStepOffset = startStep
 	started := time.Now()
 	report := TrainingReport{Steps: t.Step}
 	batch := make([]arithmetic.SequenceExample, 0, cfg.BatchSize)
-	for epoch := 0; epoch < cfg.Epochs && !reachedMaxSteps(cfg, t.Step, startStep); epoch++ {
+	for epoch := 0; epoch < runCfg.Epochs && !reachedMaxSteps(runCfg, t.Step, startStep); epoch++ {
 		rng.Shuffle(len(indices), func(i, j int) {
 			indices[i], indices[j] = indices[j], indices[i]
 		})
-		for start := 0; start < len(indices); start += cfg.BatchSize {
-			if reachedMaxSteps(cfg, t.Step, startStep) {
+		for start := 0; start < len(indices); start += runCfg.BatchSize {
+			if reachedMaxSteps(runCfg, t.Step, startStep) {
 				break
 			}
-			end := min(len(indices), start+cfg.BatchSize)
+			end := min(len(indices), start+runCfg.BatchSize)
 			batch = batch[:0]
 			for i := start; i < end; i++ {
 				batch = append(batch, train[indices[i]])
 			}
-			loss, err := t.trainBatch(batch, cfg)
+			loss, err := t.trainBatch(batch, runCfg)
 			if err != nil {
 				return TrainingReport{}, err
 			}
 			report.TrainLoss = loss
 			report.Steps = t.Step
-			if err := maybeReportProgress(cfg, t.Step, startStep, loss, started); err != nil {
+			if err := maybeReportProgress(runCfg, t.Step, startStep, loss, started); err != nil {
 				return TrainingReport{}, err
 			}
-			if err := maybeSaveCheckpoint(cfg, t.Step, startStep); err != nil {
+			if err := maybeSaveCheckpoint(runCfg, t.Step, startStep); err != nil {
 				return TrainingReport{}, err
 			}
 		}
@@ -375,12 +379,16 @@ func applyAdam(params, grads, m, v []float64, step int, cfg TrainingConfig) {
 }
 
 func effectiveLearningRate(cfg TrainingConfig, step int) float64 {
-	learningRate := cfg.LearningRate
-	if cfg.WarmupSteps > 0 && step < cfg.WarmupSteps {
-		learningRate *= float64(step) / float64(cfg.WarmupSteps)
+	scheduleStep := step - cfg.scheduleStepOffset
+	if scheduleStep < 1 {
+		scheduleStep = 1
 	}
-	if cfg.DecaySteps > 0 && step > cfg.WarmupSteps {
-		decayStep := min(step-cfg.WarmupSteps, cfg.DecaySteps)
+	learningRate := cfg.LearningRate
+	if cfg.WarmupSteps > 0 && scheduleStep < cfg.WarmupSteps {
+		learningRate *= float64(scheduleStep) / float64(cfg.WarmupSteps)
+	}
+	if cfg.DecaySteps > 0 && scheduleStep > cfg.WarmupSteps {
+		decayStep := min(scheduleStep-cfg.WarmupSteps, cfg.DecaySteps)
 		progress := float64(decayStep) / float64(cfg.DecaySteps)
 		learningRate = cfg.LearningRate - (cfg.LearningRate-cfg.MinLearningRate)*progress
 	}
