@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/augahmed/aurelius/internal/runtime"
 	"github.com/augahmed/aurelius/internal/sampler"
 	"github.com/augahmed/aurelius/internal/server"
+	"github.com/augahmed/aurelius/internal/textdata"
 	"github.com/augahmed/aurelius/internal/tokenizer"
 	"github.com/augahmed/aurelius/internal/transformer"
 )
@@ -35,12 +37,18 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 			return runGenerateMathData(args[1:], stdout, stderr)
 		case "mix-math-data":
 			return runMixMathData(args[1:], stdout, stderr)
+		case "fetch-text-data":
+			return runFetchTextData(args[1:], stdout, stderr)
 		case "train-math":
 			return runTrainMath(args[1:], stdout, stderr)
+		case "train-text":
+			return runTrainText(args[1:], stdout, stderr)
 		case "eval-math":
 			return runEvalMath(args[1:], stdout, stderr)
 		case "generate-math":
 			return runGenerateMath(args[1:], stdout, stderr)
+		case "generate-checkpoint":
+			return runGenerateCheckpoint(args[1:], stdout, stderr)
 		case "generate":
 			return runGenerate(args[1:], stdout, stderr)
 		case "generate-gpt2":
@@ -110,10 +118,10 @@ func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int 
 	valCount := flags.Int("val-count", 500, "number of validation examples")
 	minOperand := flags.Int("min-operand", 0, "minimum operand value")
 	maxOperand := flags.Int("max-operand", 20, "maximum operand value")
-	operations := flags.String("operations", "add,sub,mul,div", "comma-separated operations: add,sub,mul,div,word")
-	levels := flags.String("levels", "1,2,3,4,5", "comma-separated curriculum levels: 1,2,3,4,5,6")
+	operations := flags.String("operations", "add,sub,mul,div", "comma-separated operations: add,sub,mul,div,word,derivative")
+	levels := flags.String("levels", "1,2,3,4,5", "comma-separated curriculum levels: 1,2,3,4,5,6,7")
 	templates := flags.String("templates", "all", "comma-separated templates: equation,question,solve, or all")
-	reasoningStyle := flags.String("reasoning-style", "direct", "completion style: direct, worked, or compact")
+	reasoningStyle := flags.String("reasoning-style", "direct", "completion style: direct, worked, compact, or coefficients")
 	answerDigits := flags.String("answer-digits", "", "optional comma-separated answer digit buckets, for example 1,2")
 	smallDifferenceOnly := flags.Bool("small-difference-only", false, "only generate subtraction examples with one-digit differences")
 	seed := flags.Int64("seed", 1, "random seed")
@@ -192,6 +200,65 @@ func runMixMathData(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "wrote mixed arithmetic dataset to %s\n", *outputDir)
+	return 0
+}
+
+func runFetchTextData(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("fetch-text-data", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	outputDir := flags.String("output-dir", "", "directory to write cleaned .txt files and sources.jsonl")
+	urlsFlag := flags.String("urls", "", "comma-separated http(s) URLs to fetch")
+	urlFile := flags.String("url-file", "", "optional file containing one URL per line; # comments allowed")
+	maxPages := flags.Int("max-pages", 0, "optional cap on pages fetched; 0 fetches all URLs")
+	maxBytes := flags.Int64("max-bytes", 2*1024*1024, "maximum fetched bytes per page")
+	timeout := flags.Duration("timeout", 15*time.Second, "per-request timeout, for example 10s")
+	userAgent := flags.String("user-agent", "AureliusTextIngest/0.1", "HTTP user agent for page fetches")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *outputDir == "" {
+		fmt.Fprintln(stderr, "output-dir is required")
+		flags.Usage()
+		return 1
+	}
+	if *maxPages < 0 || *maxBytes <= 0 {
+		fmt.Fprintln(stderr, "max-pages must be non-negative and max-bytes must be positive")
+		return 1
+	}
+
+	urls := splitCSV(*urlsFlag)
+	if *urlFile != "" {
+		fileURLs, err := textdata.LoadURLList(*urlFile)
+		if err != nil {
+			fmt.Fprintf(stderr, "load URL file: %v\n", err)
+			return 1
+		}
+		urls = append(urls, fileURLs...)
+	}
+	if len(urls) == 0 {
+		fmt.Fprintln(stderr, "urls or url-file is required")
+		flags.Usage()
+		return 1
+	}
+
+	ctx := context.Background()
+	results, err := textdata.IngestWebText(ctx, urls, textdata.WebIngestConfig{
+		OutputDir: *outputDir,
+		MaxPages:  *maxPages,
+		MaxBytes:  *maxBytes,
+		Timeout:   *timeout,
+		UserAgent: *userAgent,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "fetch text data: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "wrote_text_pages=%d output_dir=%s metadata=%s\n", len(results), *outputDir, filepath.Join(*outputDir, "sources.jsonl"))
+	for _, result := range results {
+		fmt.Fprintf(stdout, "source=%q path=%q text_bytes=%d\n", result.Source, result.Path, result.TextBytes)
+	}
 	return 0
 }
 
@@ -361,6 +428,149 @@ func runTrainMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
+func runTrainText(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("train-text", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	textPaths := flags.String("text", "", "comma-separated text files or directories for pretraining")
+	valTextPaths := flags.String("val-text", "", "optional comma-separated validation text files or directories")
+	instructionPaths := flags.String("instructions", "", "comma-separated instruction JSONL files")
+	valInstructionPaths := flags.String("val-instructions", "", "optional comma-separated validation instruction JSONL files")
+	checkpointPath := flags.String("checkpoint", "", "path to write model checkpoint")
+	resumePath := flags.String("resume", "", "optional checkpoint to resume from")
+	contextSize := flags.Int("context-size", 128, "autoregressive context size")
+	embeddingDim := flags.Int("embedding-dim", 128, "embedding size")
+	hiddenDim := flags.Int("hidden-dim", 512, "transformer MLP hidden size")
+	numHeads := flags.Int("num-heads", 4, "attention heads")
+	numLayers := flags.Int("num-layers", 4, "decoder layers")
+	epochs := flags.Int("epochs", 1, "number of training epochs")
+	batchSize := flags.Int("batch-size", 16, "batch size")
+	learningRate := flags.Float64("learning-rate", 0.0003, "optimizer learning rate")
+	warmupSteps := flags.Int("warmup-steps", 100, "linearly warm learning rate over this many current-run steps; 0 disables")
+	decaySteps := flags.Int("decay-steps", 10000, "linearly decay learning rate after warmup over this many current-run steps; 0 disables")
+	minLearningRate := flags.Float64("min-learning-rate", 0.00003, "minimum learning rate after decay")
+	maxSteps := flags.Int("max-steps", 0, "optional maximum optimizer steps for this run; 0 disables")
+	logEvery := flags.Int("log-every", 100, "print training progress every N optimizer steps; 0 disables")
+	saveEvery := flags.Int("save-every", 1000, "write periodic checkpoints every N optimizer steps; 0 disables")
+	gradClip := flags.Float64("grad-clip", 1, "clip gradients by global norm before Adam; 0 disables")
+	stride := flags.Int("stride", 1, "stride between raw-text next-token training positions")
+	trainLimit := flags.Int("train-limit", 0, "optional cap on built training sequences; 0 disables")
+	valLimit := flags.Int("val-limit", 0, "optional cap on built validation sequences; 0 disables")
+	skipLossEval := flags.Bool("skip-loss-eval", false, "skip final full-dataset train and validation loss passes")
+	seed := flags.Int64("seed", 1, "random seed")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *checkpointPath == "" {
+		fmt.Fprintln(stderr, "checkpoint is required")
+		flags.Usage()
+		return 1
+	}
+	if strings.TrimSpace(*textPaths) == "" && strings.TrimSpace(*instructionPaths) == "" {
+		fmt.Fprintln(stderr, "text or instructions is required")
+		flags.Usage()
+		return 1
+	}
+	if *trainLimit < 0 || *valLimit < 0 {
+		fmt.Fprintln(stderr, "train-limit and val-limit cannot be negative")
+		return 1
+	}
+
+	tok := tokenizer.NewByteTokenizer()
+	trainer, err := loadOrCreateAnyMathTrainer(*resumePath, "transformer", mathlm.Config{}, mathlm.TransformerConfig{
+		VocabSize:    tok.VocabSize(),
+		ContextSize:  *contextSize,
+		EmbeddingDim: *embeddingDim,
+		NumHeads:     *numHeads,
+		NumLayers:    *numLayers,
+		MLPDim:       *hiddenDim,
+		Seed:         *seed,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "load trainer: %v\n", err)
+		return 1
+	}
+	if trainer.ModelType != "transformer" {
+		fmt.Fprintln(stderr, "train-text requires a transformer checkpoint")
+		return 1
+	}
+	trainingContextSize := *contextSize
+	if *resumePath != "" {
+		trainingContextSize = trainer.Model().Config().ContextLength
+	}
+
+	trainSeq, err := buildTextTrainingSequences(tok, trainingContextSize, *stride, splitCSV(*textPaths), splitCSV(*instructionPaths))
+	if err != nil {
+		fmt.Fprintf(stderr, "build training sequences: %v\n", err)
+		return 1
+	}
+	valSeq, err := buildTextTrainingSequences(tok, trainingContextSize, *stride, splitCSV(*valTextPaths), splitCSV(*valInstructionPaths))
+	if err != nil && (strings.TrimSpace(*valTextPaths) != "" || strings.TrimSpace(*valInstructionPaths) != "") {
+		fmt.Fprintf(stderr, "build validation sequences: %v\n", err)
+		return 1
+	}
+	if strings.TrimSpace(*valTextPaths) == "" && strings.TrimSpace(*valInstructionPaths) == "" {
+		valSeq = nil
+	}
+	trainSeq = limitSequences(trainSeq, *trainLimit)
+	valSeq = limitSequences(valSeq, *valLimit)
+
+	report, err := trainer.Train(trainSeq, valSeq, mathlm.TrainingConfig{
+		Epochs:             *epochs,
+		BatchSize:          *batchSize,
+		LearningRate:       *learningRate,
+		WarmupSteps:        *warmupSteps,
+		DecaySteps:         *decaySteps,
+		MinLearningRate:    *minLearningRate,
+		Beta1:              0.9,
+		Beta2:              0.999,
+		Epsilon:            1e-8,
+		Seed:               *seed,
+		MaxSteps:           *maxSteps,
+		LogEvery:           *logEvery,
+		SaveEvery:          *saveEvery,
+		GradClip:           *gradClip,
+		SkipFinalTrainLoss: *skipLossEval,
+		SkipValidationLoss: *skipLossEval,
+		OnProgress: func(progress mathlm.TrainingProgress) error {
+			fmt.Fprintf(stdout, "step=%d train_loss=%.4f learning_rate=%.6g elapsed=%s steps_per_sec=%.2f\n",
+				progress.Step,
+				progress.Loss,
+				progress.LearningRate,
+				progress.Elapsed.Truncate(time.Millisecond),
+				progress.StepsPerSecond,
+			)
+			return nil
+		},
+		OnCheckpoint: func(step int) error {
+			path := periodicCheckpointPath(*checkpointPath, step)
+			if err := mathlm.SaveAnyCheckpoint(path, trainer); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "checkpoint_step=%d path=%s\n", step, path)
+			return nil
+		},
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "train text: %v\n", err)
+		return 1
+	}
+	if err := mathlm.SaveAnyCheckpoint(*checkpointPath, trainer); err != nil {
+		fmt.Fprintf(stderr, "save checkpoint: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "model=transformer train_loss=%.4f val_loss=%.4f steps=%d train_sequences=%d val_sequences=%d\n",
+		report.TrainLoss,
+		report.ValLoss,
+		report.Steps,
+		len(trainSeq),
+		len(valSeq),
+	)
+	fmt.Fprintf(stdout, "checkpoint=%s\n", *checkpointPath)
+	return 0
+}
+
 func runEvalMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("eval-math", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -455,6 +665,44 @@ func runGenerateMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "generate math: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, output)
+	return 0
+}
+
+func runGenerateCheckpoint(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("generate-checkpoint", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	checkpointPath := flags.String("checkpoint", "", "path to JSON model checkpoint")
+	prompt := flags.String("prompt", "", "prompt text to generate from")
+	maxTokens := flags.Int("max-tokens", 64, "number of tokens to generate")
+	temperature := flags.Float64("temperature", 0, "sampling temperature; 0 keeps greedy decoding")
+	topK := flags.Int("top-k", 0, "limit token sampling to the top-k logits; 0 disables top-k sampling")
+	stop := flags.String("stop", "\\nUser:,\\n\\nUser:", "comma-separated stop strings; supports \\n and \\t escapes")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *checkpointPath == "" || *prompt == "" {
+		fmt.Fprintln(stderr, "checkpoint and prompt are required")
+		flags.Usage()
+		return 1
+	}
+	engine, err := buildMathLMEngine(*checkpointPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "create checkpoint engine: %v\n", err)
+		return 1
+	}
+	output, err := engine.GenerateWithOptions(*prompt, runtime.GenerateOptions{
+		MaxTokens:   *maxTokens,
+		TopK:        *topK,
+		StopStrings: parseStopStrings(*stop),
+		Temperature: *temperature,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "generate-checkpoint: %v\n", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, output)
@@ -673,7 +921,8 @@ func runServe(args []string, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 
 	addr := flags.String("addr", "localhost:8080", "address for the Aurelius web server")
-	backend := flags.String("backend", "auto", "model backend: auto, toy, or gpt2")
+	backend := flags.String("backend", "auto", "model backend: auto, toy, gpt2, or mathlm")
+	checkpointPath := flags.String("checkpoint", "", "path to mathlm JSON checkpoint for -backend mathlm")
 	configPath := flags.String("model-config", "", "path to GPT-2 config.json")
 	weightsPath := flags.String("weights", "", "path to GPT-2 model.safetensors")
 	vocabPath := flags.String("vocab", "", "path to GPT-2 vocab.json")
@@ -694,7 +943,7 @@ func runServe(args []string, stderr io.Writer) int {
 		weightsPath: *weightsPath,
 		vocabPath:   *vocabPath,
 		mergesPath:  *mergesPath,
-	})
+	}, *checkpointPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "create engine: %v\n", err)
 		return 1
@@ -823,6 +1072,14 @@ func buildGPT2Engine(configPath, weightsPath, vocabPath, mergesPath string) (*ru
 	return runtime.NewEngine(assets.tokenizer, assets.model, sampler.NewGreedySampler())
 }
 
+func buildMathLMEngine(checkpointPath string) (*runtime.Engine, error) {
+	trainer, err := mathlm.LoadAnyCheckpoint(checkpointPath)
+	if err != nil {
+		return nil, err
+	}
+	return runtime.NewEngine(tokenizer.NewByteTokenizer(), trainer.Model(), sampler.NewGreedySampler())
+}
+
 type gpt2Assets struct {
 	config    gpt2.Config
 	tokenizer tokenizer.Tokenizer
@@ -868,17 +1125,19 @@ type generateWithOptions interface {
 }
 
 type generatorWithDefaults struct {
-	underlying generateWithOptions
-	stopTokens []int
+	underlying  generateWithOptions
+	stopTokens  []int
+	stopStrings []string
 }
 
 func (g generatorWithDefaults) GenerateWithOptions(prompt string, options runtime.GenerateOptions) (string, error) {
 	options.StopTokens = mergeStopTokens(options.StopTokens, g.stopTokens)
+	options.StopStrings = mergeStopStrings(options.StopStrings, g.stopStrings)
 	return g.underlying.GenerateWithOptions(prompt, options)
 }
 
-func buildServeGenerator(backend, baseDir string, paths gpt2AssetPaths) (server.Generator, string, error) {
-	selectedBackend, err := resolveServeBackend(backend, baseDir, paths)
+func buildServeGenerator(backend, baseDir string, paths gpt2AssetPaths, checkpointPath string) (server.Generator, string, error) {
+	selectedBackend, err := resolveServeBackend(backend, baseDir, paths, checkpointPath)
 	if err != nil {
 		return nil, "", err
 	}
@@ -890,6 +1149,18 @@ func buildServeGenerator(backend, baseDir string, paths gpt2AssetPaths) (server.
 			return nil, "", err
 		}
 		return engine, selectedBackend, nil
+	case "mathlm":
+		if checkpointPath == "" {
+			return nil, "", fmt.Errorf("checkpoint is required for mathlm backend")
+		}
+		engine, err := buildMathLMEngine(checkpointPath)
+		if err != nil {
+			return nil, "", err
+		}
+		return generatorWithDefaults{
+			underlying:  engine,
+			stopStrings: []string{"\nUser:", "\n\nUser:"},
+		}, selectedBackend, nil
 	case "gpt2":
 		resolved := resolveGPT2AssetPaths(baseDir, paths)
 		assets, err := loadGPT2Assets(resolved.configPath, resolved.weightsPath, resolved.vocabPath, resolved.mergesPath)
@@ -909,18 +1180,21 @@ func buildServeGenerator(backend, baseDir string, paths gpt2AssetPaths) (server.
 	}
 }
 
-func resolveServeBackend(requested, baseDir string, paths gpt2AssetPaths) (string, error) {
+func resolveServeBackend(requested, baseDir string, paths gpt2AssetPaths, checkpointPath string) (string, error) {
 	switch requested {
-	case "toy", "gpt2":
+	case "toy", "gpt2", "mathlm":
 		return requested, nil
 	case "auto", "":
+		if checkpointPath != "" {
+			return "mathlm", nil
+		}
 		resolved := resolveGPT2AssetPaths(baseDir, paths)
 		if hasGPT2Assets(resolved) {
 			return "gpt2", nil
 		}
 		return "toy", nil
 	default:
-		return "", fmt.Errorf("backend must be one of auto, toy, or gpt2")
+		return "", fmt.Errorf("backend must be one of auto, toy, gpt2, or mathlm")
 	}
 }
 
@@ -971,6 +1245,29 @@ func mergeStopTokens(existing, defaults []int) []int {
 	return merged
 }
 
+func mergeStopStrings(existing, defaults []string) []string {
+	if len(defaults) == 0 {
+		return existing
+	}
+	merged := append([]string(nil), existing...)
+	for _, candidate := range defaults {
+		if candidate == "" {
+			continue
+		}
+		seen := false
+		for _, current := range merged {
+			if current == candidate {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			merged = append(merged, candidate)
+		}
+	}
+	return merged
+}
+
 func serveGeneratePolicy(backend string) server.GeneratePolicy {
 	switch backend {
 	case "gpt2":
@@ -986,6 +1283,26 @@ func serveGeneratePolicy(backend string) server.GeneratePolicy {
 			MaxMessageRunes:    240,
 			MaxPromptRunes:     480,
 			AssistantPreamble:  "You are a helpful assistant. Answer directly and completely.",
+			DefaultStopStrings: []string{"\nUser:", "\n\nUser:"},
+			MaxStopStrings:     8,
+			MaxStopRunes:       64,
+		}
+	case "mathlm":
+		return server.GeneratePolicy{
+			DefaultMaxTokens:   64,
+			MaxTokensCap:       256,
+			DefaultTemperature: 0.7,
+			MinTemperature:     0.1,
+			MaxTemperature:     1.2,
+			DefaultTopK:        40,
+			MaxTopK:            100,
+			MaxMessages:        8,
+			MaxMessageRunes:    512,
+			MaxPromptRunes:     2048,
+			AssistantPreamble:  "You are Aurelius, a concise helpful assistant.",
+			DefaultStopStrings: []string{"\nUser:", "\n\nUser:"},
+			MaxStopStrings:     8,
+			MaxStopRunes:       64,
 		}
 	default:
 		return server.GeneratePolicy{}
@@ -997,6 +1314,20 @@ func splitCSV(value string) []string {
 	out := make([]string, 0, len(parts))
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func parseStopStrings(value string) []string {
+	parts := splitCSV(value)
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.ReplaceAll(part, `\n`, "\n")
+		part = strings.ReplaceAll(part, `\r`, "\r")
+		part = strings.ReplaceAll(part, `\t`, "\t")
 		if part != "" {
 			out = append(out, part)
 		}
@@ -1179,6 +1510,46 @@ func limitExamples(examples []arithmetic.Example, limit int) []arithmetic.Exampl
 		return examples
 	}
 	return examples[:limit]
+}
+
+func buildTextTrainingSequences(tok tokenizer.Tokenizer, contextSize int, stride int, textPaths []string, instructionPaths []string) ([]arithmetic.SequenceExample, error) {
+	sequences := make([]arithmetic.SequenceExample, 0)
+	if len(textPaths) > 0 {
+		text, err := textdata.LoadText(textPaths)
+		if err != nil {
+			return nil, err
+		}
+		textSequences, err := textdata.BuildPretrainingSequences(text, tok, textdata.BuildConfig{
+			ContextSize: contextSize,
+			Stride:      stride,
+		})
+		if err != nil {
+			return nil, err
+		}
+		sequences = append(sequences, textSequences...)
+	}
+	if len(instructionPaths) > 0 {
+		examples, err := textdata.LoadInstructionExamples(instructionPaths)
+		if err != nil {
+			return nil, err
+		}
+		instructionSequences, err := textdata.BuildInstructionSequences(examples, tok, contextSize)
+		if err != nil {
+			return nil, err
+		}
+		sequences = append(sequences, instructionSequences...)
+	}
+	if len(sequences) == 0 {
+		return nil, fmt.Errorf("no text training sequences built")
+	}
+	return sequences, nil
+}
+
+func limitSequences(sequences []arithmetic.SequenceExample, limit int) []arithmetic.SequenceExample {
+	if limit <= 0 || limit >= len(sequences) {
+		return sequences
+	}
+	return sequences[:limit]
 }
 
 func loadOrCreateMathTrainer(resumePath string, cfg mathlm.Config) (*mathlm.Trainer, error) {

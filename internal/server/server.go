@@ -37,6 +37,7 @@ type GenerateRequest struct {
 	Temperature float64       `json:"temperature"`
 	TopK        int           `json:"top_k"`
 	UseCache    bool          `json:"use_cache"`
+	Stop        []string      `json:"stop"`
 	Messages    []ChatMessage `json:"messages"`
 }
 
@@ -57,6 +58,9 @@ type GeneratePolicy struct {
 	MaxPromptRunes     int
 	AssistantPreamble  string
 	DisableCache       bool
+	DefaultStopStrings []string
+	MaxStopStrings     int
+	MaxStopRunes       int
 }
 
 type Option func(*Server)
@@ -136,6 +140,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		MaxTokens:   options.MaxTokens,
 		TopK:        options.TopK,
 		UseCache:    options.UseCache,
+		StopStrings: options.StopStrings,
 		Temperature: options.Temperature,
 	})
 	if err != nil {
@@ -223,6 +228,7 @@ func (s *Server) resolveGenerateOptions(req GenerateRequest) runtime.GenerateOpt
 		MaxTokens:   maxTokens,
 		TopK:        resolveTopK(req.TopK, s.policy),
 		UseCache:    useCache,
+		StopStrings: resolveStopStrings(req.Stop, s.policy),
 		Temperature: resolveTemperature(req.Temperature, s.policy),
 	}
 }
@@ -291,4 +297,48 @@ func resolveTopK(requested int, policy GeneratePolicy) int {
 		topK = policy.MaxTopK
 	}
 	return topK
+}
+
+func resolveStopStrings(requested []string, policy GeneratePolicy) []string {
+	values := append([]string(nil), requested...)
+	values = append(values, policy.DefaultStopStrings...)
+	limit := len(values)
+	if policy.MaxStopStrings > 0 && limit > policy.MaxStopStrings {
+		limit = policy.MaxStopStrings
+	}
+	out := make([]string, 0, limit)
+	for _, value := range values {
+		value = strings.Trim(value, "\r")
+		if value == "" {
+			continue
+		}
+		if policy.MaxStopRunes > 0 {
+			value = trimLeadingRunes(value, policy.MaxStopRunes)
+		}
+		seen := false
+		for _, existing := range out {
+			if existing == value {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, value)
+		}
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func trimLeadingRunes(value string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return string(runes[:maxRunes])
 }

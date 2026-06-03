@@ -116,9 +116,12 @@ func TestServerGenerateAppliesPolicyToOptions(t *testing.T) {
 		MaxTemperature:     1.2,
 		DefaultTopK:        20,
 		MaxTopK:            40,
+		DefaultStopStrings: []string{"\nUser:"},
+		MaxStopStrings:     3,
+		MaxStopRunes:       8,
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"hello","max_tokens":32,"temperature":9,"top_k":100,"use_cache":true}`))
+	req := httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(`{"prompt":"hello","max_tokens":32,"temperature":9,"top_k":100,"use_cache":true,"stop":["END","END","oversized-stop"]}`))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
@@ -136,6 +139,9 @@ func TestServerGenerateAppliesPolicyToOptions(t *testing.T) {
 	}
 	if !engine.options.UseCache {
 		t.Fatal("expected use_cache to remain enabled")
+	}
+	if want := []string{"END", "oversize", "\nUser:"}; !equalStrings(engine.options.StopStrings, want) {
+		t.Fatalf("options.StopStrings = %q, want %q", engine.options.StopStrings, want)
 	}
 }
 
@@ -292,4 +298,16 @@ func (f *fakeGenerator) GenerateWithOptions(prompt string, options runtime.Gener
 		return "", f.err
 	}
 	return prompt + f.outputSuffix, nil
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

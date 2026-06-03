@@ -21,6 +21,7 @@ The current prototype is intentionally small:
 - `internal/tokenizer` defines the tokenizer boundary and ships with both a simple byte tokenizer and a GPT-2 style BPE tokenizer loader.
 - `internal/model` defines shared model contracts and configuration.
 - `internal/arithmetic` generates synthetic arithmetic datasets and builds training sequences.
+- `internal/textdata` loads raw text and instruction JSONL for byte-tokenized transformer pretraining.
 - `internal/gpt2` loads GPT-2 model config metadata from local `config.json` files.
 - `internal/mathlm` contains a small trainable autoregressive MLP language model for student-scale arithmetic experiments.
 - `internal/transformer` contains a deterministic toy transformer-style model that exercises the runtime path.
@@ -77,12 +78,16 @@ go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l2-question -o
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l3-worked -operations add,sub -levels 3 -reasoning-style worked
 go run ./cmd/aurelius mix-math-data -output-dir ./data/arithmetic-l2-replay -inputs ./data/arithmetic-l2-transformer:1,./data/arithmetic-l2-small-sub:2
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l3-transformer -operations add,sub -levels 3
+go run ./cmd/aurelius fetch-text-data -url-file ./data/text/math-urls.txt -output-dir ./data/text/web-math
 go run ./cmd/aurelius train-math -data-dir ./data/arithmetic -checkpoint ./artifacts/mathlm.json
+go run ./cmd/aurelius train-text -text ./data/text/train -checkpoint ./artifacts/aurelius-text.json
 go run ./cmd/aurelius eval-math -checkpoint ./artifacts/mathlm.json -data ./data/arithmetic/val.jsonl
 go run ./cmd/aurelius eval-math -checkpoint ./artifacts/mathlm.json -data ./data/arithmetic/val.jsonl -show-errors 10 -errors-out ./artifacts/math-errors.json
 go run ./cmd/aurelius generate-math -checkpoint ./artifacts/mathlm.json -prompt "12 + 7 = "
+go run ./cmd/aurelius generate-checkpoint -checkpoint ./artifacts/aurelius-text.json -prompt "User: hello\n\nAssistant:" -max-tokens 64
 go run ./cmd/aurelius serve
 go run ./cmd/aurelius serve -backend gpt2
+go run ./cmd/aurelius serve -backend mathlm -checkpoint ./artifacts/aurelius-text.json
 go run ./cmd/aurelius serve -addr localhost:8080
 go run ./cmd/aurelius tokenize -vocab /path/to/vocab.json -merges /path/to/merges.txt -text "hello world"
 go run ./cmd/aurelius inspect-model -model-config /path/to/config.json -vocab /path/to/vocab.json -merges /path/to/merges.txt
@@ -98,7 +103,7 @@ go run ./cmd/aurelius serve
 
 Then open `http://localhost:8080`.
 
-`serve` now supports `-backend auto|toy|gpt2`. In `auto` mode, Aurelius uses the GPT-2 backend when a complete checkpoint exists under `artifacts/gpt2/`; otherwise it falls back to the toy model.
+`serve` now supports `-backend auto|toy|gpt2|mathlm`. In `auto` mode, Aurelius uses a `mathlm` JSON checkpoint when `-checkpoint` is provided, then GPT-2 when a complete checkpoint exists under `artifacts/gpt2/`, otherwise it falls back to the toy model.
 
 The web UI provides:
 
@@ -113,6 +118,8 @@ The web UI provides:
 
 When `serve` is using the GPT-2 backend, the web path now applies conservative request limits for responsiveness: a short assistant preamble, bounded temperature and top-k sampling, modest default reply length, capped generation length, trimmed conversation history, and cache-aware incremental decoding.
 
+When `serve` is using the `mathlm` backend, it loads a local Aurelius JSON checkpoint and applies chat-oriented defaults, including stop strings for `User:` turns. See [docs/llm-training.md](docs/llm-training.md) for text pretraining, instruction tuning, checkpoint generation, web inference, and math regression commands.
+
 ## Arithmetic Training
 
 Aurelius now includes a student-scale from-scratch training path for arithmetic. It uses:
@@ -123,7 +130,7 @@ Aurelius now includes a student-scale from-scratch training path for arithmetic.
 - `train-math -model transformer` for a configurable-depth causal decoder transformer with manual full-path backpropagation
 - JSON checkpoints for save/resume
 - step-limited training, progress logging, periodic checkpoints, gradient clipping, and learning-rate warmup/decay for longer curriculum runs
-- direct-answer, worked-solution, or compact worked completions via `gen-math-data -reasoning-style direct|worked|compact`
+- direct-answer, worked-solution, compact worked, or derivative coefficient-vector completions via `gen-math-data -reasoning-style direct|worked|compact|coefficients`
 - exact-match evaluation on held-out arithmetic prompts, grouped by operation and curriculum level
 
 This path is intentionally small and educational. It is not a frontier LLM training stack and it does not replace the existing GPT-2 inference path.
@@ -135,6 +142,7 @@ go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l1 -operations
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l1-l3 -operations add,sub -levels 1,2,3
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l3-worked -operations add,sub -levels 3 -reasoning-style worked
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-word -operations word -levels 6
+go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-derivative -operations derivative -levels 7 -reasoning-style coefficients
 go run ./cmd/aurelius train-math -model transformer -data-dir ./data/arithmetic-l1 -checkpoint ./artifacts/math-transformer-l1.json -num-heads 4 -num-layers 2 -epochs 25 -batch-size 32 -learning-rate 0.003 -warmup-steps 100 -decay-steps 2000 -min-learning-rate 0.0003
 ```
 

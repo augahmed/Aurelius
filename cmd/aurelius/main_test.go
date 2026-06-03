@@ -5,6 +5,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"math"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +19,7 @@ import (
 	"github.com/augahmed/aurelius/internal/mathlm"
 	"github.com/augahmed/aurelius/internal/runtime"
 	"github.com/augahmed/aurelius/internal/server"
+	"github.com/augahmed/aurelius/internal/tokenizer"
 )
 
 func TestRunTokenize(t *testing.T) {
@@ -211,7 +215,7 @@ func TestResolveServeBackendAutoUsesGPT2WhenAssetsExist(t *testing.T) {
 	baseDir := t.TempDir()
 	writeGPT2ModelAssetsAt(t, filepath.Join(baseDir, "artifacts", "gpt2"))
 
-	got, err := resolveServeBackend("auto", baseDir, gpt2AssetPaths{})
+	got, err := resolveServeBackend("auto", baseDir, gpt2AssetPaths{}, "")
 	if err != nil {
 		t.Fatalf("resolveServeBackend error: %v", err)
 	}
@@ -221,7 +225,7 @@ func TestResolveServeBackendAutoUsesGPT2WhenAssetsExist(t *testing.T) {
 }
 
 func TestResolveServeBackendAutoFallsBackToToy(t *testing.T) {
-	got, err := resolveServeBackend("auto", t.TempDir(), gpt2AssetPaths{})
+	got, err := resolveServeBackend("auto", t.TempDir(), gpt2AssetPaths{}, "")
 	if err != nil {
 		t.Fatalf("resolveServeBackend error: %v", err)
 	}
@@ -230,22 +234,37 @@ func TestResolveServeBackendAutoFallsBackToToy(t *testing.T) {
 	}
 }
 
+func TestResolveServeBackendAutoUsesMathLMWhenCheckpointProvided(t *testing.T) {
+	got, err := resolveServeBackend("auto", t.TempDir(), gpt2AssetPaths{}, "checkpoint.json")
+	if err != nil {
+		t.Fatalf("resolveServeBackend error: %v", err)
+	}
+	if got != "mathlm" {
+		t.Fatalf("resolveServeBackend() = %q, want %q", got, "mathlm")
+	}
+}
+
 func TestBuildServeGeneratorUsesStopTokenDefaults(t *testing.T) {
 	fake := &recordingGenerator{}
 	wrapped := generatorWithDefaults{
-		underlying: fake,
-		stopTokens: []int{50256},
+		underlying:  fake,
+		stopTokens:  []int{50256},
+		stopStrings: []string{"\nUser:"},
 	}
 
 	_, err := wrapped.GenerateWithOptions("prompt", runtime.GenerateOptions{
-		MaxTokens:  1,
-		StopTokens: []int{7},
+		MaxTokens:   1,
+		StopTokens:  []int{7},
+		StopStrings: []string{"END"},
 	})
 	if err != nil {
 		t.Fatalf("GenerateWithOptions error: %v", err)
 	}
 	if !reflect.DeepEqual(fake.options.StopTokens, []int{7, 50256}) {
 		t.Fatalf("stop tokens = %v, want %v", fake.options.StopTokens, []int{7, 50256})
+	}
+	if !reflect.DeepEqual(fake.options.StopStrings, []string{"END", "\nUser:"}) {
+		t.Fatalf("stop strings = %q, want merged defaults", fake.options.StopStrings)
 	}
 }
 
@@ -263,9 +282,25 @@ func TestServeGeneratePolicyForGPT2(t *testing.T) {
 		MaxMessageRunes:    240,
 		MaxPromptRunes:     480,
 		AssistantPreamble:  "You are a helpful assistant. Answer directly and completely.",
+		DefaultStopStrings: []string{"\nUser:", "\n\nUser:"},
+		MaxStopStrings:     8,
+		MaxStopRunes:       64,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("serveGeneratePolicy() = %+v, want %+v", got, want)
+	}
+}
+
+func TestServeGeneratePolicyForMathLM(t *testing.T) {
+	got := serveGeneratePolicy("mathlm")
+	if got.DefaultMaxTokens != 64 || got.MaxTokensCap != 256 {
+		t.Fatalf("mathlm token policy = %+v, want default/cap", got)
+	}
+	if got.AssistantPreamble == "" {
+		t.Fatal("expected mathlm assistant preamble")
+	}
+	if !reflect.DeepEqual(got.DefaultStopStrings, []string{"\nUser:", "\n\nUser:"}) {
+		t.Fatalf("default stop strings = %q", got.DefaultStopStrings)
 	}
 }
 
@@ -421,6 +456,60 @@ func TestRunMixMathData(t *testing.T) {
 	}
 }
 
+func TestRunFetchTextData(t *testing.T) {
+	srv := newLocalHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head><title>Lesson</title></head><body><p>The derivative of x^2 is 2x.</p></body></html>`))
+	}))
+	defer srv.Close()
+
+	outputDir := filepath.Join(t.TempDir(), "text")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"fetch-text-data",
+		"-output-dir", outputDir,
+		"-urls", srv.URL + "/lesson",
+		"-max-bytes", "2048",
+		"-timeout", "2s",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "wrote_text_pages=1") {
+		t.Fatalf("stdout = %q, want fetch summary", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "sources.jsonl")); err != nil {
+		t.Fatalf("sources.jsonl missing: %v", err)
+	}
+	textFiles, err := filepath.Glob(filepath.Join(outputDir, "*.txt"))
+	if err != nil {
+		t.Fatalf("Glob error: %v", err)
+	}
+	if len(textFiles) != 1 {
+		t.Fatalf("text file count = %d, want 1", len(textFiles))
+	}
+	raw, err := os.ReadFile(textFiles[0])
+	if err != nil {
+		t.Fatalf("ReadFile text error: %v", err)
+	}
+	if !strings.Contains(string(raw), "The derivative of x^2 is 2x.") {
+		t.Fatalf("text = %q, want cleaned page text", string(raw))
+	}
+}
+
+func newLocalHTTPServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local listener unavailable: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(handler)
+	srv.Listener = listener
+	srv.Start()
+	return srv
+}
+
 func TestRunTrainMathWithTrainingControls(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "data")
@@ -507,6 +596,105 @@ func TestRunTrainMathWithTrainingControls(t *testing.T) {
 	}
 	if resumed.Transformer.Step != 2 {
 		t.Fatalf("resumed transformer step = %d, want 2", resumed.Transformer.Step)
+	}
+}
+
+func TestRunTrainTextWithRawTextAndInstructions(t *testing.T) {
+	root := t.TempDir()
+	textPath := filepath.Join(root, "pretrain.txt")
+	instructionPath := filepath.Join(root, "instructions.jsonl")
+	checkpointPath := filepath.Join(root, "text-transformer.json")
+	if err := os.WriteFile(textPath, []byte("hello aurelius\nhello math\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile text error: %v", err)
+	}
+	instructions := `{"instruction":"Answer briefly.","input":"What is 2 + 2?","output":"4"}` + "\n"
+	if err := os.WriteFile(instructionPath, []byte(instructions), 0o644); err != nil {
+		t.Fatalf("WriteFile instructions error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"train-text",
+		"-text", textPath,
+		"-instructions", instructionPath,
+		"-checkpoint", checkpointPath,
+		"-context-size", "16",
+		"-embedding-dim", "8",
+		"-hidden-dim", "16",
+		"-num-heads", "2",
+		"-num-layers", "1",
+		"-epochs", "10",
+		"-batch-size", "2",
+		"-learning-rate", "0.001",
+		"-max-steps", "1",
+		"-log-every", "1",
+		"-save-every", "1",
+		"-train-limit", "8",
+		"-skip-loss-eval",
+		"-seed", "41",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "model=transformer") {
+		t.Fatalf("stdout = %q, want text training report", output)
+	}
+	if !strings.Contains(output, "train_sequences=8") {
+		t.Fatalf("stdout = %q, want limited sequence count", output)
+	}
+	loaded, err := mathlm.LoadAnyCheckpoint(checkpointPath)
+	if err != nil {
+		t.Fatalf("LoadAnyCheckpoint error: %v", err)
+	}
+	if loaded.ModelType != "transformer" || loaded.Transformer.Step != 1 {
+		t.Fatalf("loaded checkpoint type=%q step=%d, want transformer step 1", loaded.ModelType, loaded.Transformer.Step)
+	}
+}
+
+func TestRunGenerateCheckpoint(t *testing.T) {
+	root := t.TempDir()
+	checkpointPath := filepath.Join(root, "checkpoint.json")
+	tok := tokenizer.NewByteTokenizer()
+	model, err := mathlm.NewTransformerModel(mathlm.TransformerConfig{
+		VocabSize:    tok.VocabSize(),
+		ContextSize:  8,
+		EmbeddingDim: 8,
+		NumHeads:     2,
+		NumLayers:    1,
+		MLPDim:       16,
+		Seed:         51,
+	})
+	if err != nil {
+		t.Fatalf("NewTransformerModel error: %v", err)
+	}
+	trainer, err := mathlm.NewTransformerTrainer(model)
+	if err != nil {
+		t.Fatalf("NewTransformerTrainer error: %v", err)
+	}
+	anyTrainer, err := mathlm.NewTransformerAnyTrainer(trainer)
+	if err != nil {
+		t.Fatalf("NewTransformerAnyTrainer error: %v", err)
+	}
+	if err := mathlm.SaveAnyCheckpoint(checkpointPath, anyTrainer); err != nil {
+		t.Fatalf("SaveAnyCheckpoint error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"generate-checkpoint",
+		"-checkpoint", checkpointPath,
+		"-prompt", "User: hi\n\nAssistant:",
+		"-max-tokens", "1",
+		"-stop", "\\nUser:",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.HasPrefix(stdout.String(), "User: hi\n\nAssistant:") {
+		t.Fatalf("stdout = %q, want prompt prefix", stdout.String())
 	}
 }
 

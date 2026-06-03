@@ -3,6 +3,7 @@ package runtime
 import (
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/augahmed/aurelius/internal/model"
@@ -20,6 +21,7 @@ type GenerateOptions struct {
 	MaxTokens   int
 	UseCache    bool
 	StopTokens  []int
+	StopStrings []string
 	Temperature float64
 	TopK        int
 }
@@ -89,6 +91,9 @@ func (e *Engine) generateWithoutCache(tokens []int, options GenerateOptions) (st
 		if shouldStop(next, options.StopTokens) {
 			break
 		}
+		if shouldStopString(e.tokenizer, tokens, options.StopStrings) {
+			break
+		}
 	}
 	return e.tokenizer.Decode(tokens)
 }
@@ -115,6 +120,9 @@ func (e *Engine) generateWithCache(tokens []int, options GenerateOptions, cacheM
 		}
 		tokens = append(tokens, next)
 		if shouldStop(next, options.StopTokens) {
+			break
+		}
+		if shouldStopString(e.tokenizer, tokens, options.StopStrings) {
 			break
 		}
 		if i == options.MaxTokens-1 {
@@ -154,6 +162,22 @@ func (e *Engine) samplerForOptions(options GenerateOptions) (sampler.Sampler, er
 func shouldStop(token int, stopTokens []int) bool {
 	for _, stopToken := range stopTokens {
 		if token == stopToken {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldStopString(tok tokenizer.Tokenizer, tokens []int, stopStrings []string) bool {
+	if len(stopStrings) == 0 {
+		return false
+	}
+	text, err := tok.Decode(tokens)
+	if err != nil {
+		return false
+	}
+	for _, stop := range stopStrings {
+		if stop != "" && strings.HasSuffix(text, stop) {
 			return true
 		}
 	}

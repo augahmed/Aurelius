@@ -179,6 +179,20 @@ func TestEngineRejectsInvalidTopK(t *testing.T) {
 	}
 }
 
+func TestShouldStopString(t *testing.T) {
+	tok := tokenizer.NewByteTokenizer()
+	tokens, err := tok.Encode("Assistant: ok\nUser:")
+	if err != nil {
+		t.Fatalf("Encode error: %v", err)
+	}
+	if !shouldStopString(tok, tokens, []string{"\nUser:"}) {
+		t.Fatal("expected stop string suffix to match")
+	}
+	if shouldStopString(tok, tokens, []string{"Assistant:"}) {
+		t.Fatal("did not expect non-suffix stop string to match")
+	}
+}
+
 func newTestEngine(t *testing.T) (*Engine, error) {
 	t.Helper()
 	model, err := newTinyModel()
