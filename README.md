@@ -1,16 +1,24 @@
 # Aurelius
 
-Aurelius is a Go-based transformer inference runtime built from scratch for small, correct, extensible decoding experiments.
+Aurelius is a Go implementation of a small transformer inference and training stack for math-focused language model experiments. It includes a byte-tokenized causal transformer, synthetic math curriculum generation, exact-match evaluation, checkpoint export tooling, and a local web interface backed by a math router.
 
 ## Status
 
-Early prototype.
+Active research prototype. The codebase is designed for correctness, inspection, and reproducible small-model experiments rather than large-scale distributed training.
 
-## Public Repo Quickstart
+## Capabilities
 
-This repository is safe to publish as source code. Generated datasets, checkpoints, caches, and local virtual environments are intentionally ignored by Git.
+- Train small autoregressive MLP and transformer language models from JSONL math datasets.
+- Generate arithmetic, multiplication, and polynomial derivative curricula with metadata for grouped evaluation.
+- Evaluate checkpoints by exact-match accuracy across operation, level, prompt template, answer length, and other tags.
+- Serve a browser chat interface through the Go HTTP server.
+- Route natural-language math prompts through specialist checkpoints with deterministic fallback for supported expressions.
+- Export inference-only checkpoint artifacts by stripping optimizer state from trainer checkpoints.
+- Load GPT-2 style tokenizer and weight assets for parity-oriented inference experiments.
 
-Clone and test:
+## Quickstart
+
+Clone the repository and run the test suite:
 
 ```bash
 git clone https://github.com/<your-user>/Aurelius.git
@@ -18,15 +26,19 @@ cd Aurelius
 go test ./...
 ```
 
-Run the local web UI with the built-in toy backend:
+Start the local web server:
 
 ```bash
 go run ./cmd/aurelius serve
 ```
 
-Then open `http://localhost:8080`.
+Open `http://localhost:8080`. Without checkpoint flags, the server uses the built-in toy backend so the web path can be tested immediately.
 
-To run the math-router backend, users need local checkpoints. They can either train their own or place downloaded checkpoints under `./artifacts/`:
+## Math Router
+
+The highest-accuracy math path is the `math-router` backend. It normalizes supported user prompts into direct model prompts, asks the trained specialist checkpoint first, and falls back to deterministic math evaluation when the model answer does not exactly match the computed result.
+
+Place release checkpoints under `./artifacts/` or pass explicit paths:
 
 ```bash
 go run ./cmd/aurelius serve \
@@ -35,17 +47,37 @@ go run ./cmd/aurelius serve \
   -derivative-checkpoint ./artifacts/math-transformer-2layer-l7-derivative-full-v2.json
 ```
 
-For public releases, export inference-only checkpoints instead of publishing trainer checkpoints with optimizer state:
+This route is intended for precise supported math tasks, not unrestricted general chat. It is appropriate for arithmetic, multiplication, and the derivative formats covered by the training and router code.
+
+## Checkpoint Release
+
+Trainer checkpoints include Adam optimizer state so training can resume. Public inference artifacts should strip that state before release:
 
 ```bash
 go run ./cmd/aurelius export-checkpoint \
   -checkpoint ./artifacts/math-transformer-2layer-l1-l4-direct-v4b.json \
   -output ./release-checkpoints/math-router-arithmetic-v4b.json
+
+go run ./cmd/aurelius export-checkpoint \
+  -checkpoint ./artifacts/math-transformer-2layer-l7-derivative-full-v2.json \
+  -output ./release-checkpoints/math-router-derivative-full-v2.json
 ```
 
-Attach selected files from `./release-checkpoints/` to a GitHub Release. Do not commit or publish the full `artifacts/` directory.
+Attach selected files from `./release-checkpoints/` to a GitHub Release. Do not commit or publish the full `artifacts/` directory; it can contain intermediate checkpoints, eval errors, datasets, and local experiment outputs.
 
-To train a small checkpoint from scratch:
+Recommended release checks:
+
+```bash
+go test ./...
+
+rg -n "august|ahmed|/Users|Aurelius|http|https|private|secret|token|api[_-]?key|password|email|@" ./release-checkpoints
+```
+
+Expected string-scan matches are limited to model field names such as `token_embeddings`.
+
+## Training Smoke Test
+
+Generate a small dataset and train a transformer checkpoint:
 
 ```bash
 go run ./cmd/aurelius gen-math-data \
@@ -69,28 +101,22 @@ go run ./cmd/aurelius train-math \
   -grad-clip 1
 ```
 
-## Long-Term Goals
-
-- Build a clean transformer inference core in Go.
-- Support autoregressive decoding with reusable KV cache abstractions.
-- Add tokenizer, model loader, batching, streaming, and benchmarking layers incrementally.
-- Create a foundation that can grow toward GPT-2 and LLaMA-style inference paths without rewriting the architecture.
-
 ## Architecture Overview
 
-The current prototype is intentionally small:
+Aurelius keeps the runtime small and inspectable:
 
-- `internal/tensor` provides basic CPU tensor math for correctness-first experimentation.
-- `internal/tokenizer` defines the tokenizer boundary and ships with both a simple byte tokenizer and a GPT-2 style BPE tokenizer loader.
-- `internal/model` defines shared model contracts and configuration.
-- `internal/arithmetic` generates synthetic arithmetic datasets and builds training sequences.
-- `internal/textdata` loads raw text and instruction JSONL for byte-tokenized transformer pretraining.
+- `internal/tensor` provides basic CPU tensor operations.
+- `internal/tokenizer` defines tokenizer boundaries and includes byte-level and GPT-2 style BPE tokenizers.
+- `internal/model` defines shared model interfaces and configuration.
+- `internal/arithmetic` generates synthetic math datasets and converts examples into training sequences.
+- `internal/textdata` loads, inspects, deduplicates, splits, and converts raw text and instruction JSONL.
 - `internal/gpt2` loads GPT-2 model config metadata from local `config.json` files.
-- `internal/mathlm` contains a small trainable autoregressive MLP language model for student-scale arithmetic experiments.
+- `internal/mathlm` contains the trainable autoregressive MLP and transformer language models.
+- `internal/mathrouter` normalizes supported math prompts and coordinates model-first inference with deterministic fallback.
 - `internal/transformer` contains a deterministic toy transformer-style model that exercises the runtime path.
 - `internal/sampler` provides greedy and temperature-based next-token selection.
-- `internal/runtime` coordinates tokenization, model forward passes, and autoregressive generation, including optional KV-cached decoding when a model supports it.
-- `internal/server` serves a lightweight local web app and JSON API for browser-based interaction.
+- `internal/runtime` coordinates tokenization, model forward passes, autoregressive generation, stop strings, and optional KV-cached decoding.
+- `internal/server` serves the local chat interface and JSON generation API.
 - `cmd/aurelius` exposes the prototype via a CLI.
 
 ## Package Layout
@@ -99,31 +125,23 @@ The current prototype is intentionally small:
 aurelius/
   cmd/aurelius/        CLI entrypoint
   internal/tensor/     Basic tensor math primitives
-  internal/tokenizer/  Tokenizer interfaces and prototype implementation
+  internal/tokenizer/  Tokenizer interfaces and implementations
   internal/gpt2/       GPT-2 asset config loader
   internal/model/      Shared model interfaces and config
-  internal/transformer/Tiny transformer-style prototype model
+  internal/transformer/ Tiny transformer-style model
+  internal/mathrouter/ Math prompt normalization and router fallback
   internal/sampler/    Token sampling strategies
   internal/runtime/    Generation engine
-  internal/server/     Minimal HTTP server skeleton
+  internal/server/     Web server and browser UI
   benchmarks/          Benchmark harnesses and notes
   docs/                Architecture and design notes
 ```
 
-## First Milestone
+## Current Scope
 
-- [x] Initialize Go module and repository layout
-- [x] Define tokenizer, sampler, and model interfaces
-- [x] Implement correctness-first tensor operations
-- [x] Build a deterministic toy transformer inference path
-- [x] Add an autoregressive runtime loop
-- [x] Add optional KV-cached autoregressive generation in the runtime
-- [x] Expose a simple CLI
-- [x] Add a local chat-style web UI served by Go
-- [x] Add initial tests and architecture documentation
-- [ ] Add pretrained weight loading
-- [ ] Add student-scale training workflow from scratch
-- [ ] Add streaming and benchmarking workflows
+Aurelius is strongest as a controlled math inference platform. The math-router backend combines trained specialist checkpoints with exact deterministic validation for supported expressions. The standalone checkpoints are still small neural models and should be evaluated with `eval-math` before being presented as general-purpose math solvers.
+
+Generated datasets, checkpoints, cache directories, release checkpoint exports, and local virtual environments are excluded from Git. Public checkpoint files should be distributed through GitHub Releases or another artifact channel.
 
 ## Example CLI Usage
 
@@ -171,11 +189,11 @@ go run ./cmd/aurelius serve
 
 Then open `http://localhost:8080`.
 
-`serve` now supports `-backend auto|toy|gpt2|mathlm`. In `auto` mode, Aurelius uses a `mathlm` JSON checkpoint when `-checkpoint` is provided, then GPT-2 when a complete checkpoint exists under `artifacts/gpt2/`, otherwise it falls back to the toy model.
+`serve` supports `-backend auto|toy|gpt2|mathlm|math-router`. In `auto` mode, Aurelius uses `math-router` when both specialist checkpoints are provided, uses `mathlm` when a single JSON checkpoint is provided, uses GPT-2 when complete assets exist under `artifacts/gpt2/`, and otherwise falls back to the toy model.
 
 The web UI provides:
 
-- a polished chat-style interface
+- a chat-style interface
 - prompt entry
 - max token control
 - temperature control
@@ -201,7 +219,7 @@ Aurelius now includes a student-scale from-scratch training path for arithmetic.
 - direct-answer, worked-solution, compact worked, or derivative coefficient-vector completions via `gen-math-data -reasoning-style direct|worked|compact|coefficients`
 - exact-match evaluation on held-out arithmetic prompts, grouped by operation and curriculum level
 
-This path is intentionally small and educational. It is not a frontier LLM training stack and it does not replace the existing GPT-2 inference path.
+This path is intentionally small and inspectable. It is not a large-scale LLM training stack and it does not replace the existing GPT-2 inference path.
 
 Curriculum levels let you scale data difficulty without changing the model first:
 
@@ -233,10 +251,10 @@ go run ./cmd/aurelius serve
 
 ## Notes
 
-This repository does not attempt real model loading yet. The current focus is architectural clarity, stable tests, and a small inference path that future work can replace piece by piece.
+This repository supports Aurelius JSON checkpoints for trained math models and local GPT-2 style assets for parity experiments. The current focus is architectural clarity, stable tests, and a small inference path that future work can replace piece by piece.
 
 Cache-aware generation is optional per model. `runtime.Engine` detects models that implement the cache-capable extension and uses incremental decoding only for those models; all other models continue to use the uncached full-sequence path.
 
-The local web UI uses the same runtime engine and generation options as the CLI. Chat history is stored in the browser for now rather than persisted server-side.
+The local web UI uses the same runtime engine and generation options as the CLI. Chat history is stored in the browser rather than persisted server-side.
 
-The `generate-gpt2` path now runs a real non-cached GPT-2 style forward pass from loaded safetensors weights, while `inspect-gpt2-next` and `validate-gpt2` support parity validation. The default CLI and web UI still use the toy transformer until the GPT-2 path has broader real-checkpoint validation and feature parity.
+The `generate-gpt2` path runs a non-cached GPT-2 style forward pass from loaded safetensors weights, while `inspect-gpt2-next` and `validate-gpt2` support parity validation. The default CLI and web UI still use the toy transformer unless a specific backend or checkpoint is provided.
