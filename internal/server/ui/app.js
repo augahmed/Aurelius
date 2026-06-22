@@ -19,6 +19,7 @@ const state = {
 };
 
 applySettings();
+resizePromptInput();
 renderMessages();
 
 chatForm.addEventListener("submit", async (event) => {
@@ -52,6 +53,7 @@ chatForm.addEventListener("submit", async (event) => {
   renderMessages();
 
   promptInput.value = "";
+  resizePromptInput();
   state.pending = true;
   renderPendingMessage();
   setStatus("Generating…", false);
@@ -104,6 +106,8 @@ promptInput.addEventListener("keydown", (event) => {
     chatForm.requestSubmit();
   }
 });
+
+promptInput.addEventListener("input", resizePromptInput);
 
 clearHistoryButton.addEventListener("click", () => {
   state.messages = [];
@@ -265,6 +269,11 @@ function setStatus(message, isError) {
 
 function scrollToBottom() {
   chatHistory.scrollTop = chatHistory.scrollHeight;
+}
+
+function resizePromptInput() {
+  promptInput.style.height = "auto";
+  promptInput.style.height = `${promptInput.scrollHeight}px`;
 }
 
 function normalizeMaxTokens() {

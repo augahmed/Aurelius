@@ -36,8 +36,8 @@ func TestServerIndex(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if !strings.Contains(rec.Body.String(), "Aurelius Console") {
-		t.Fatalf("body = %q, want Aurelius UI", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "Aurelius Chat") || !strings.Contains(rec.Body.String(), `id="chat-form"`) {
+		t.Fatalf("body = %q, want Aurelius chat UI", rec.Body.String())
 	}
 }
 

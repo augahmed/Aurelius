@@ -3,83 +3,67 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Aurelius Console</title>
+    <title>Aurelius Chat</title>
     <link rel="stylesheet" href="/assets/styles.css">
   </head>
   <body>
-    <div class="app-shell">
-      <div class="backdrop backdrop-left"></div>
-      <div class="backdrop backdrop-right"></div>
-
-      <header class="hero">
-        <div class="brand">
-          <span class="brand-mark">A</span>
-          <div>
-            <p class="eyebrow">Local Transformer Runtime</p>
-            <h1>Aurelius Console</h1>
-          </div>
-        </div>
-        <p class="hero-copy">A polished local console for prompt-driven decoding, cache-aware inference, and quick iteration against the Aurelius runtime.</p>
-      </header>
-
-      <main class="layout">
-        <section class="chat-panel">
-          <div class="panel-header">
+    <main class="app-shell">
+      <section class="chat-frame" aria-label="Aurelius chat interface">
+        <header class="top-bar">
+          <div class="brand">
+            <span class="brand-mark">A</span>
             <div>
-              <p class="panel-label">Conversation</p>
-              <h2>Session History</h2>
-            </div>
-            <button id="clear-history" class="ghost-button" type="button">Clear</button>
-          </div>
-          <div id="chat-history" class="chat-history" aria-live="polite"></div>
-        </section>
-
-        <aside class="control-panel">
-          <div class="panel-header">
-            <div>
-              <p class="panel-label">Controls</p>
-              <h2>Generation</h2>
+              <p class="eyebrow">Local math runtime</p>
+              <h1>Aurelius</h1>
             </div>
           </div>
-
-          <form id="chat-form" class="chat-form">
-            <label class="field">
-              <span>Prompt</span>
-              <textarea id="prompt-input" name="prompt" rows="6" placeholder="Ask Aurelius something concise. Shift+Enter for a newline." required></textarea>
-            </label>
-
-            <label class="field">
-              <span>Max Tokens</span>
-              <input id="max-tokens" name="maxTokens" type="number" min="0" max="12" value="8">
-            </label>
-
-            <label class="field">
-              <span>Temperature</span>
-              <input id="temperature" name="temperature" type="number" min="0" max="1.5" step="0.1" value="0.8">
-            </label>
-
-            <label class="field">
-              <span>Top K</span>
-              <input id="top-k" name="topK" type="number" min="0" max="80" step="1" value="40">
-            </label>
-
-            <label class="toggle">
-              <input id="use-cache" name="useCache" type="checkbox" checked>
-              <span class="toggle-copy">
-                <strong>Use KV Cache</strong>
-                <small>Incremental decoding when the active backend supports it.</small>
-              </span>
-            </label>
-
-            <div class="form-actions">
-              <button id="submit-button" class="primary-button" type="submit">Generate Reply</button>
-            </div>
-
+          <div class="top-actions">
             <p id="status-text" class="status-text" role="status"></p>
-          </form>
-        </aside>
-      </main>
-    </div>
+            <button id="clear-history" class="ghost-button" type="button">Clear chat</button>
+          </div>
+        </header>
+
+        <div class="conversation-panel">
+          <div id="chat-history" class="chat-history" aria-live="polite"></div>
+        </div>
+
+        <form id="chat-form" class="composer">
+          <label class="prompt-field" for="prompt-input">
+            <span class="sr-only">Prompt</span>
+            <textarea id="prompt-input" name="prompt" rows="1" placeholder="Ask Aurelius a math question..." required></textarea>
+          </label>
+
+          <div class="composer-footer">
+            <details class="advanced-controls">
+              <summary>Generation controls</summary>
+              <div class="control-grid">
+                <label class="field">
+                  <span>Max tokens</span>
+                  <input id="max-tokens" name="maxTokens" type="number" min="0" max="64" value="8">
+                </label>
+
+                <label class="field">
+                  <span>Temperature</span>
+                  <input id="temperature" name="temperature" type="number" min="0" max="1.5" step="0.1" value="0">
+                </label>
+
+                <label class="field">
+                  <span>Top K</span>
+                  <input id="top-k" name="topK" type="number" min="0" max="80" step="1" value="1">
+                </label>
+
+                <label class="toggle">
+                  <input id="use-cache" name="useCache" type="checkbox" checked>
+                  <span>KV cache</span>
+                </label>
+              </div>
+            </details>
+
+            <button id="submit-button" class="primary-button" type="submit">Send</button>
+          </div>
+        </form>
+      </section>
+    </main>
 
     <template id="message-template">
       <article class="message">

@@ -19,6 +19,7 @@ import (
 	"github.com/augahmed/aurelius/internal/mathlm"
 	"github.com/augahmed/aurelius/internal/runtime"
 	"github.com/augahmed/aurelius/internal/server"
+	"github.com/augahmed/aurelius/internal/textdata"
 	"github.com/augahmed/aurelius/internal/tokenizer"
 )
 
@@ -215,7 +216,7 @@ func TestResolveServeBackendAutoUsesGPT2WhenAssetsExist(t *testing.T) {
 	baseDir := t.TempDir()
 	writeGPT2ModelAssetsAt(t, filepath.Join(baseDir, "artifacts", "gpt2"))
 
-	got, err := resolveServeBackend("auto", baseDir, gpt2AssetPaths{}, "")
+	got, err := resolveServeBackend("auto", baseDir, gpt2AssetPaths{}, "", "")
 	if err != nil {
 		t.Fatalf("resolveServeBackend error: %v", err)
 	}
@@ -225,7 +226,7 @@ func TestResolveServeBackendAutoUsesGPT2WhenAssetsExist(t *testing.T) {
 }
 
 func TestResolveServeBackendAutoFallsBackToToy(t *testing.T) {
-	got, err := resolveServeBackend("auto", t.TempDir(), gpt2AssetPaths{}, "")
+	got, err := resolveServeBackend("auto", t.TempDir(), gpt2AssetPaths{}, "", "")
 	if err != nil {
 		t.Fatalf("resolveServeBackend error: %v", err)
 	}
@@ -235,12 +236,22 @@ func TestResolveServeBackendAutoFallsBackToToy(t *testing.T) {
 }
 
 func TestResolveServeBackendAutoUsesMathLMWhenCheckpointProvided(t *testing.T) {
-	got, err := resolveServeBackend("auto", t.TempDir(), gpt2AssetPaths{}, "checkpoint.json")
+	got, err := resolveServeBackend("auto", t.TempDir(), gpt2AssetPaths{}, "checkpoint.json", "")
 	if err != nil {
 		t.Fatalf("resolveServeBackend error: %v", err)
 	}
 	if got != "mathlm" {
 		t.Fatalf("resolveServeBackend() = %q, want %q", got, "mathlm")
+	}
+}
+
+func TestResolveServeBackendAutoUsesMathRouterWhenBothCheckpointsProvided(t *testing.T) {
+	got, err := resolveServeBackend("auto", t.TempDir(), gpt2AssetPaths{}, "arithmetic.json", "derivative.json")
+	if err != nil {
+		t.Fatalf("resolveServeBackend error: %v", err)
+	}
+	if got != "math-router" {
+		t.Fatalf("resolveServeBackend() = %q, want %q", got, "math-router")
 	}
 }
 
@@ -456,6 +467,148 @@ func TestRunMixMathData(t *testing.T) {
 	}
 }
 
+func TestRunGenerateMathErrorReplay(t *testing.T) {
+	root := t.TempDir()
+	errorsPath := filepath.Join(root, "errors.json")
+	output := filepath.Join(root, "replay")
+	payload := map[string]any{
+		"total":    3,
+		"correct":  1,
+		"accuracy": 1.0 / 3.0,
+		"errors": []mathlm.EvalError{{
+			Prompt:         "What is 7 * 8? ",
+			Expected:       "55",
+			Generated:      "54",
+			Operation:      "mul",
+			Level:          4,
+			Template:       "question",
+			AnswerDigits:   2,
+			MinOperand:     0,
+			MaxOperand:     12,
+			ReasoningStyle: "direct",
+		}, {
+			Prompt:          "What is 90 - 87? ",
+			Expected:        "3",
+			Generated:       "13",
+			Operation:       "sub",
+			Level:           3,
+			Template:        "question",
+			AnswerDigits:    1,
+			SmallDifference: true,
+			RequiresBorrow:  true,
+			MinOperand:      10,
+			MaxOperand:      99,
+			ReasoningStyle:  "direct",
+		}, {
+			Prompt:          "What is 90 - 87? ",
+			Expected:        "3",
+			Generated:       "13",
+			Operation:       "sub",
+			Level:           3,
+			Template:        "question",
+			AnswerDigits:    1,
+			SmallDifference: true,
+			RequiresBorrow:  true,
+			MinOperand:      10,
+			MaxOperand:      99,
+			ReasoningStyle:  "direct",
+		}},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal payload error: %v", err)
+	}
+	if err := os.WriteFile(errorsPath, data, 0o644); err != nil {
+		t.Fatalf("WriteFile errors error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"gen-math-error-replay",
+		"-errors", errorsPath,
+		"-output-dir", output,
+		"-repeat", "2",
+		"-val-ratio", "0.5",
+		"-seed", "1",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "unique_errors=2 train=2 val=1 repeat=2") {
+		t.Fatalf("stdout = %q, want replay summary", stdout.String())
+	}
+	train, err := arithmetic.LoadExamples(filepath.Join(output, "train.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples train error: %v", err)
+	}
+	val, err := arithmetic.LoadExamples(filepath.Join(output, "val.jsonl"))
+	if err != nil {
+		t.Fatalf("LoadExamples val error: %v", err)
+	}
+	all := append(append([]arithmetic.Example(nil), train...), val...)
+	if len(train) != 2 || len(val) != 1 {
+		t.Fatalf("len(train)=%d len(val)=%d, want 2 and 1", len(train), len(val))
+	}
+	foundRouterAnswer := false
+	for _, example := range all {
+		if example.Prompt == "What is 7 * 8? " {
+			foundRouterAnswer = true
+			if example.Completion != "56" || example.Answer != "56" {
+				t.Fatalf("example = %+v, want router-corrected answer 56", example)
+			}
+		}
+	}
+	if !foundRouterAnswer {
+		t.Fatal("expected replay data to include multiplication error")
+	}
+	if _, err := os.Stat(filepath.Join(output, "meta.json")); err != nil {
+		t.Fatalf("meta.json missing: %v", err)
+	}
+}
+
+func TestRunGenerateMathInstructions(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "arithmetic")
+	output := filepath.Join(root, "instructions")
+	if err := arithmetic.GenerateDataset(source, arithmetic.GenerateConfig{
+		TrainCount: 2,
+		ValCount:   1,
+		Operations: []string{"add"},
+		Levels:     []int{1},
+		Templates:  []string{"equation"},
+		Seed:       17,
+	}); err != nil {
+		t.Fatalf("GenerateDataset error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"gen-math-instructions",
+		"-data-dir", source,
+		"-output-dir", output,
+		"-system", "Answer exactly.",
+		"-format", "chat",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "train=2 val=1 format=chat") {
+		t.Fatalf("stdout = %q, want instruction generation summary", stdout.String())
+	}
+	train, err := textdata.LoadInstructionExamples([]string{filepath.Join(output, "train.jsonl")})
+	if err != nil {
+		t.Fatalf("LoadInstructionExamples train error: %v", err)
+	}
+	if len(train) != 2 || !strings.HasPrefix(train[0].Prompt, "User: Solve:") {
+		t.Fatalf("train = %+v, want chat instruction examples", train)
+	}
+	if _, err := os.Stat(filepath.Join(output, "meta.json")); err != nil {
+		t.Fatalf("meta.json missing: %v", err)
+	}
+}
+
 func TestRunFetchTextData(t *testing.T) {
 	srv := newLocalHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -495,6 +648,66 @@ func TestRunFetchTextData(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "The derivative of x^2 is 2x.") {
 		t.Fatalf("text = %q, want cleaned page text", string(raw))
+	}
+}
+
+func TestRunInspectDedupeAndSplitTextData(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "input")
+	deduped := filepath.Join(root, "deduped")
+	split := filepath.Join(root, "split")
+	if err := os.MkdirAll(input, 0o755); err != nil {
+		t.Fatalf("MkdirAll input error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(input, "a.txt"), []byte("Repeated paragraph.\n\nUnique A.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile a error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(input, "b.txt"), []byte("Repeated paragraph.\n\nUnique B.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile b error: %v", err)
+	}
+
+	var inspectStdout bytes.Buffer
+	var inspectStderr bytes.Buffer
+	code := run([]string{
+		"inspect-text-data",
+		"-text", input,
+		"-short-bytes", "4",
+	}, &inspectStdout, &inspectStderr)
+	if code != 0 {
+		t.Fatalf("inspect run() exit code = %d, stderr = %q", code, inspectStderr.String())
+	}
+	if !strings.Contains(inspectStdout.String(), "duplicate_paragraphs=1") {
+		t.Fatalf("inspect stdout = %q, want duplicate paragraph count", inspectStdout.String())
+	}
+
+	var dedupeStdout bytes.Buffer
+	var dedupeStderr bytes.Buffer
+	code = run([]string{
+		"dedupe-text-data",
+		"-text", input,
+		"-output-dir", deduped,
+	}, &dedupeStdout, &dedupeStderr)
+	if code != 0 {
+		t.Fatalf("dedupe run() exit code = %d, stderr = %q", code, dedupeStderr.String())
+	}
+	if !strings.Contains(dedupeStdout.String(), "duplicate_paragraphs=1") {
+		t.Fatalf("dedupe stdout = %q, want duplicate paragraph count", dedupeStdout.String())
+	}
+
+	var splitStdout bytes.Buffer
+	var splitStderr bytes.Buffer
+	code = run([]string{
+		"split-text-data",
+		"-text", deduped,
+		"-output-dir", split,
+		"-val-ratio", "0.5",
+		"-seed", "1",
+	}, &splitStdout, &splitStderr)
+	if code != 0 {
+		t.Fatalf("split run() exit code = %d, stderr = %q", code, splitStderr.String())
+	}
+	if !strings.Contains(splitStdout.String(), "train_files=1") || !strings.Contains(splitStdout.String(), "val_files=1") {
+		t.Fatalf("split stdout = %q, want 1 train / 1 val", splitStdout.String())
 	}
 }
 
@@ -698,6 +911,106 @@ func TestRunGenerateCheckpoint(t *testing.T) {
 	}
 }
 
+func TestRunExportCheckpointStripsOptimizer(t *testing.T) {
+	root := t.TempDir()
+	checkpointPath := filepath.Join(root, "checkpoint.json")
+	exportPath := filepath.Join(root, "release", "checkpoint.json")
+
+	model, err := mathlm.NewTransformerModel(mathlm.TransformerConfig{
+		VocabSize:    tokenizer.NewByteTokenizer().VocabSize(),
+		ContextSize:  8,
+		EmbeddingDim: 8,
+		NumHeads:     2,
+		NumLayers:    1,
+		MLPDim:       16,
+		Seed:         52,
+	})
+	if err != nil {
+		t.Fatalf("NewTransformerModel error: %v", err)
+	}
+	trainer, err := mathlm.NewTransformerTrainer(model)
+	if err != nil {
+		t.Fatalf("NewTransformerTrainer error: %v", err)
+	}
+	anyTrainer, err := mathlm.NewTransformerAnyTrainer(trainer)
+	if err != nil {
+		t.Fatalf("NewTransformerAnyTrainer error: %v", err)
+	}
+	if err := mathlm.SaveAnyCheckpoint(checkpointPath, anyTrainer); err != nil {
+		t.Fatalf("SaveAnyCheckpoint error: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := run([]string{
+		"export-checkpoint",
+		"-checkpoint", checkpointPath,
+		"-output", exportPath,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() exit code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "strip_optimizer=true") {
+		t.Fatalf("stdout = %q, want strip optimizer report", stdout.String())
+	}
+
+	exported, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatalf("ReadFile export error: %v", err)
+	}
+	if strings.Contains(string(exported), "token_embeddings_m") {
+		t.Fatalf("exported checkpoint contains optimizer tensor")
+	}
+	if !strings.Contains(string(exported), `"adam": null`) {
+		t.Fatalf("exported checkpoint = %q, want null optimizer field", string(exported))
+	}
+	loaded, err := mathlm.LoadAnyCheckpoint(exportPath)
+	if err != nil {
+		t.Fatalf("LoadAnyCheckpoint export error: %v", err)
+	}
+	if loaded.ModelType != "transformer" || loaded.Transformer == nil || loaded.Transformer.Adam == nil {
+		t.Fatalf("loaded export = %+v, want loadable transformer with recreated optimizer", loaded)
+	}
+}
+
+func TestEvaluateInstructionExamples(t *testing.T) {
+	examples := []textdata.InstructionExample{{
+		System:      "Answer briefly.",
+		Instruction: "What is 2 + 2?",
+		Output:      "4",
+	}, {
+		System:      "Answer briefly.",
+		Instruction: "What is 3 + 5?",
+		Output:      "8",
+	}}
+	firstPrompt, _ := examples[0].PromptCompletion()
+	secondPrompt, _ := examples[1].PromptCompletion()
+	generator := scriptedGenerator{
+		outputs: map[string]string{
+			firstPrompt:  firstPrompt + " 4\nUser: next",
+			secondPrompt: secondPrompt + " 9",
+		},
+	}
+
+	report, err := evaluateInstructionExamples(generator, examples, tokenizer.NewByteTokenizer(), instructionEvalOptions{
+		MaxTokens:     8,
+		StopStrings:   []string{"\nUser:"},
+		CollectErrors: true,
+	})
+	if err != nil {
+		t.Fatalf("evaluateInstructionExamples error: %v", err)
+	}
+	if report.Total != 2 || report.Correct != 1 || report.Accuracy != 0.5 {
+		t.Fatalf("report = %+v, want one correct out of two", report)
+	}
+	if len(report.Errors) != 1 {
+		t.Fatalf("errors = %d, want 1", len(report.Errors))
+	}
+	if report.Errors[0].Expected != "8" || report.Errors[0].Generated != "9" {
+		t.Fatalf("error = %+v, want generated mismatch", report.Errors[0])
+	}
+}
+
 type gpt2TestAssets struct {
 	vocabPath   string
 	mergesPath  string
@@ -876,4 +1189,15 @@ type recordingGenerator struct {
 func (g *recordingGenerator) GenerateWithOptions(_ string, options runtime.GenerateOptions) (string, error) {
 	g.options = options
 	return "ok", nil
+}
+
+type scriptedGenerator struct {
+	outputs map[string]string
+}
+
+func (g scriptedGenerator) GenerateWithOptions(prompt string, _ runtime.GenerateOptions) (string, error) {
+	if output, ok := g.outputs[prompt]; ok {
+		return output, nil
+	}
+	return prompt, nil
 }

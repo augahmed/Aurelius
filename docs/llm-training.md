@@ -25,12 +25,38 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius fetch-tex
 
 Only fetch pages you are allowed to use. The command writes cleaned `.txt` files plus `sources.jsonl`; training should read the local output directory, not live URLs.
 
+Inspect the fetched text before training:
+
+```sh
+env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius inspect-text-data \
+  -text ./data/text/web-math
+```
+
+Remove duplicate paragraphs and very short fragments:
+
+```sh
+env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius dedupe-text-data \
+  -text ./data/text/web-math \
+  -output-dir ./data/text/web-math-deduped \
+  -min-paragraph-runes 20
+```
+
+Create a deterministic train/validation split:
+
+```sh
+env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius split-text-data \
+  -text ./data/text/web-math-deduped \
+  -output-dir ./data/text/web-math-split \
+  -val-ratio 0.1 \
+  -seed 1
+```
+
 Use `train-text` with one or more `.txt` or `.md` files or directories:
 
 ```sh
 env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius train-text \
-  -text ./data/text/web-math \
-  -val-text ./data/text/val \
+  -text ./data/text/web-math-split/train \
+  -val-text ./data/text/web-math-split/val \
   -checkpoint ./artifacts/aurelius-text.json \
   -context-size 128 \
   -embedding-dim 128 \
@@ -64,12 +90,30 @@ or instruction fields:
 {"system":"Be concise.","instruction":"What is 2 + 2?","output":"4"}
 ```
 
+You can convert generated arithmetic datasets into instruction examples:
+
+```sh
+env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius gen-math-data \
+  -output-dir ./data/arithmetic-instruct-source \
+  -operations add,sub,mul,derivative \
+  -levels 1,2,3,4,7 \
+  -templates all \
+  -reasoning-style direct \
+  -train-count 20000 \
+  -val-count 2000
+
+env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius gen-math-instructions \
+  -data-dir ./data/arithmetic-instruct-source \
+  -output-dir ./data/instructions/math \
+  -format compact
+```
+
 Resume from a pretrained checkpoint:
 
 ```sh
 env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius train-text \
-  -instructions ./data/instructions/train.jsonl \
-  -val-instructions ./data/instructions/val.jsonl \
+  -instructions ./data/instructions/math/train.jsonl \
+  -val-instructions ./data/instructions/math/val.jsonl \
   -resume ./artifacts/aurelius-text.json \
   -checkpoint ./artifacts/aurelius-instruct.json \
   -batch-size 16 \
@@ -99,6 +143,18 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius generate-
 
 Use greedy decoding with `-temperature 0 -top-k 0`. Use `-top-k 40 -temperature 0.7` for more varied chat output.
 
+## Instruction Eval
+
+Evaluate instruction-tuned checkpoints against the same prompt wrapper used for training:
+
+```sh
+env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius eval-instructions \
+  -checkpoint ./artifacts/aurelius-instruct.json \
+  -instructions ./data/instructions/math/val.jsonl \
+  -show-errors 20 \
+  -errors-out ./artifacts/aurelius-instruct-errors.json
+```
+
 ## Web Inference
 
 Serve a checkpoint through `/generate`:
@@ -111,6 +167,18 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius serve \
 ```
 
 The JSON API accepts `prompt`, `messages`, `max_tokens`, `temperature`, `top_k`, `use_cache`, and `stop`.
+
+For the current math-centered path, prefer the deterministic router instead of instruction-tuning one checkpoint to understand every chat wrapper. It normalizes user text into the direct prompt format, solves supported integer arithmetic and polynomial derivatives directly, and routes unsupported forms to specialist checkpoints:
+
+```sh
+env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius serve \
+  -backend math-router \
+  -checkpoint ./artifacts/math-transformer-2layer-l1-l4-direct-v4b.json \
+  -derivative-checkpoint ./artifacts/math-transformer-2layer-l7-derivative-full-v2.json \
+  -addr localhost:8080
+```
+
+Examples accepted by the router include `What is 7 * 8?`, `Can you solve 7 times 8?`, and `What is the derivative of x^2?`.
 
 ## Math Regression Evals
 

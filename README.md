@@ -6,6 +6,69 @@ Aurelius is a Go-based transformer inference runtime built from scratch for smal
 
 Early prototype.
 
+## Public Repo Quickstart
+
+This repository is safe to publish as source code. Generated datasets, checkpoints, caches, and local virtual environments are intentionally ignored by Git.
+
+Clone and test:
+
+```bash
+git clone https://github.com/<your-user>/Aurelius.git
+cd Aurelius
+go test ./...
+```
+
+Run the local web UI with the built-in toy backend:
+
+```bash
+go run ./cmd/aurelius serve
+```
+
+Then open `http://localhost:8080`.
+
+To run the math-router backend, users need local checkpoints. They can either train their own or place downloaded checkpoints under `./artifacts/`:
+
+```bash
+go run ./cmd/aurelius serve \
+  -backend math-router \
+  -checkpoint ./artifacts/math-transformer-2layer-l1-l4-direct-v4b.json \
+  -derivative-checkpoint ./artifacts/math-transformer-2layer-l7-derivative-full-v2.json
+```
+
+For public releases, export inference-only checkpoints instead of publishing trainer checkpoints with optimizer state:
+
+```bash
+go run ./cmd/aurelius export-checkpoint \
+  -checkpoint ./artifacts/math-transformer-2layer-l1-l4-direct-v4b.json \
+  -output ./release-checkpoints/math-router-arithmetic-v4b.json
+```
+
+Attach selected files from `./release-checkpoints/` to a GitHub Release. Do not commit or publish the full `artifacts/` directory.
+
+To train a small checkpoint from scratch:
+
+```bash
+go run ./cmd/aurelius gen-math-data \
+  -output-dir ./data/arithmetic-smoke \
+  -operations add,sub,mul \
+  -levels 1,2,4 \
+  -train-count 2000 \
+  -val-count 300
+
+go run ./cmd/aurelius train-math \
+  -model transformer \
+  -data-dir ./data/arithmetic-smoke \
+  -checkpoint ./artifacts/math-transformer-smoke.json \
+  -context-size 32 \
+  -embedding-dim 64 \
+  -hidden-dim 256 \
+  -num-heads 4 \
+  -num-layers 2 \
+  -max-steps 1000 \
+  -log-every 100 \
+  -grad-clip 1
+```
+
 ## Long-Term Goals
 
 - Build a clean transformer inference core in Go.
@@ -78,13 +141,18 @@ go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l2-question -o
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l3-worked -operations add,sub -levels 3 -reasoning-style worked
 go run ./cmd/aurelius mix-math-data -output-dir ./data/arithmetic-l2-replay -inputs ./data/arithmetic-l2-transformer:1,./data/arithmetic-l2-small-sub:2
 go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l3-transformer -operations add,sub -levels 3
+go run ./cmd/aurelius gen-math-instructions -data-dir ./data/arithmetic-l3-transformer -output-dir ./data/instructions/math
 go run ./cmd/aurelius fetch-text-data -url-file ./data/text/math-urls.txt -output-dir ./data/text/web-math
+go run ./cmd/aurelius inspect-text-data -text ./data/text/web-math
+go run ./cmd/aurelius dedupe-text-data -text ./data/text/web-math -output-dir ./data/text/web-math-deduped
+go run ./cmd/aurelius split-text-data -text ./data/text/web-math-deduped -output-dir ./data/text/web-math-split -val-ratio 0.1
 go run ./cmd/aurelius train-math -data-dir ./data/arithmetic -checkpoint ./artifacts/mathlm.json
-go run ./cmd/aurelius train-text -text ./data/text/train -checkpoint ./artifacts/aurelius-text.json
+go run ./cmd/aurelius train-text -text ./data/text/web-math-split/train -val-text ./data/text/web-math-split/val -checkpoint ./artifacts/aurelius-text.json
 go run ./cmd/aurelius eval-math -checkpoint ./artifacts/mathlm.json -data ./data/arithmetic/val.jsonl
 go run ./cmd/aurelius eval-math -checkpoint ./artifacts/mathlm.json -data ./data/arithmetic/val.jsonl -show-errors 10 -errors-out ./artifacts/math-errors.json
 go run ./cmd/aurelius generate-math -checkpoint ./artifacts/mathlm.json -prompt "12 + 7 = "
 go run ./cmd/aurelius generate-checkpoint -checkpoint ./artifacts/aurelius-text.json -prompt "User: hello\n\nAssistant:" -max-tokens 64
+go run ./cmd/aurelius export-checkpoint -checkpoint ./artifacts/mathlm.json -output ./release-checkpoints/mathlm-inference.json
 go run ./cmd/aurelius serve
 go run ./cmd/aurelius serve -backend gpt2
 go run ./cmd/aurelius serve -backend mathlm -checkpoint ./artifacts/aurelius-text.json
@@ -118,7 +186,7 @@ The web UI provides:
 
 When `serve` is using the GPT-2 backend, the web path now applies conservative request limits for responsiveness: a short assistant preamble, bounded temperature and top-k sampling, modest default reply length, capped generation length, trimmed conversation history, and cache-aware incremental decoding.
 
-When `serve` is using the `mathlm` backend, it loads a local Aurelius JSON checkpoint and applies chat-oriented defaults, including stop strings for `User:` turns. See [docs/llm-training.md](docs/llm-training.md) for text pretraining, instruction tuning, checkpoint generation, web inference, and math regression commands.
+When `serve` is using the `mathlm` backend, it loads a local Aurelius JSON checkpoint and applies chat-oriented defaults, including stop strings for `User:` turns. For higher-accuracy math web inference, `-backend math-router` normalizes user phrasing into direct math prompts and routes to arithmetic and derivative specialist checkpoints. See [docs/llm-training.md](docs/llm-training.md) for text pretraining, instruction tuning, checkpoint generation, web inference, and math regression commands.
 
 ## Arithmetic Training
 

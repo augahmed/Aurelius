@@ -16,6 +16,18 @@ coverage.out
 vendor/
 .gocache/
 
+# Local Python tooling
+.venv/
+.venv-*/
+
+# Generated training outputs and checkpoints
+artifacts/
+release-checkpoints/
+data/
+tmp_arithmetic_data/
+tmp_arithmetic_small/
+tmp_arithmetic_*.json
+
 # Editors and OS files
 .DS_Store
 .idea/

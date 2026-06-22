@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +20,7 @@ import (
 	"github.com/augahmed/aurelius/internal/arithmetic"
 	"github.com/augahmed/aurelius/internal/gpt2"
 	"github.com/augahmed/aurelius/internal/mathlm"
+	"github.com/augahmed/aurelius/internal/mathrouter"
 	"github.com/augahmed/aurelius/internal/runtime"
 	"github.com/augahmed/aurelius/internal/sampler"
 	"github.com/augahmed/aurelius/internal/server"
@@ -35,20 +38,34 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		switch args[0] {
 		case "gen-math-data":
 			return runGenerateMathData(args[1:], stdout, stderr)
+		case "gen-math-error-replay":
+			return runGenerateMathErrorReplay(args[1:], stdout, stderr)
+		case "gen-math-instructions":
+			return runGenerateMathInstructions(args[1:], stdout, stderr)
 		case "mix-math-data":
 			return runMixMathData(args[1:], stdout, stderr)
 		case "fetch-text-data":
 			return runFetchTextData(args[1:], stdout, stderr)
+		case "inspect-text-data":
+			return runInspectTextData(args[1:], stdout, stderr)
+		case "dedupe-text-data":
+			return runDedupeTextData(args[1:], stdout, stderr)
+		case "split-text-data":
+			return runSplitTextData(args[1:], stdout, stderr)
 		case "train-math":
 			return runTrainMath(args[1:], stdout, stderr)
 		case "train-text":
 			return runTrainText(args[1:], stdout, stderr)
 		case "eval-math":
 			return runEvalMath(args[1:], stdout, stderr)
+		case "eval-instructions":
+			return runEvalInstructions(args[1:], stdout, stderr)
 		case "generate-math":
 			return runGenerateMath(args[1:], stdout, stderr)
 		case "generate-checkpoint":
 			return runGenerateCheckpoint(args[1:], stdout, stderr)
+		case "export-checkpoint":
+			return runExportCheckpoint(args[1:], stdout, stderr)
 		case "generate":
 			return runGenerate(args[1:], stdout, stderr)
 		case "generate-gpt2":
@@ -171,6 +188,144 @@ func runGenerateMathData(args []string, stdout io.Writer, stderr io.Writer) int 
 	return 0
 }
 
+func runGenerateMathErrorReplay(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("gen-math-error-replay", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	errorsPath := flags.String("errors", "", "eval-math errors JSON file produced by -errors-out")
+	outputDir := flags.String("output-dir", "", "directory to write replay train.jsonl, val.jsonl, and meta.json")
+	repeat := flags.Int("repeat", 3, "number of times to repeat each training error example")
+	valRatio := flags.Float64("val-ratio", 0.1, "fraction of unique error examples held out for validation")
+	limit := flags.Int("limit", 0, "optional cap on loaded error examples before dedupe; 0 disables")
+	seed := flags.Int64("seed", 1, "random seed")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *errorsPath == "" || *outputDir == "" {
+		fmt.Fprintln(stderr, "errors and output-dir are required")
+		flags.Usage()
+		return 1
+	}
+	if *repeat <= 0 {
+		fmt.Fprintln(stderr, "repeat must be positive")
+		return 1
+	}
+	if *valRatio < 0 || *valRatio >= 1 {
+		fmt.Fprintln(stderr, "val-ratio must be >= 0 and < 1")
+		return 1
+	}
+	if *limit < 0 {
+		fmt.Fprintln(stderr, "limit cannot be negative")
+		return 1
+	}
+
+	report, err := loadMathEvalErrorReplayReport(*errorsPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load errors: %v\n", err)
+		return 1
+	}
+	errors := report.Errors
+	if *limit > 0 && *limit < len(errors) {
+		errors = errors[:*limit]
+	}
+	unique := buildErrorReplayExamples(errors)
+	if len(unique) == 0 {
+		fmt.Fprintln(stderr, "errors file did not contain any replayable examples")
+		return 1
+	}
+
+	rng := rand.New(rand.NewSource(*seed))
+	rng.Shuffle(len(unique), func(i, j int) {
+		unique[i], unique[j] = unique[j], unique[i]
+	})
+	trainUnique, val := splitReplayExamples(unique, *valRatio)
+	train := repeatExamples(trainUnique, *repeat)
+	rng.Shuffle(len(train), func(i, j int) {
+		train[i], train[j] = train[j], train[i]
+	})
+	if len(val) == 0 {
+		val = append([]arithmetic.Example(nil), trainUnique...)
+	}
+
+	if err := os.MkdirAll(*outputDir, 0o755); err != nil {
+		fmt.Fprintf(stderr, "create output dir: %v\n", err)
+		return 1
+	}
+	if err := writeArithmeticJSONL(filepath.Join(*outputDir, "train.jsonl"), train); err != nil {
+		fmt.Fprintf(stderr, "write train: %v\n", err)
+		return 1
+	}
+	if err := writeArithmeticJSONL(filepath.Join(*outputDir, "val.jsonl"), val); err != nil {
+		fmt.Fprintf(stderr, "write val: %v\n", err)
+		return 1
+	}
+	meta := mathErrorReplayMetadata{
+		SourceErrors:     *errorsPath,
+		SourceTotal:      report.Total,
+		SourceCorrect:    report.Correct,
+		SourceAccuracy:   report.Accuracy,
+		InputErrors:      len(errors),
+		UniqueErrors:     len(unique),
+		TrainCount:       len(train),
+		ValCount:         len(val),
+		Repeat:           *repeat,
+		ValRatio:         *valRatio,
+		Seed:             *seed,
+		AnswerSource:     "router_when_supported_else_expected",
+		ReplayCompletion: "direct_final_answer",
+	}
+	if err := writeJSONFile(filepath.Join(*outputDir, "meta.json"), meta); err != nil {
+		fmt.Fprintf(stderr, "write meta: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "wrote math error replay dataset to %s unique_errors=%d train=%d val=%d repeat=%d\n",
+		*outputDir,
+		len(unique),
+		len(train),
+		len(val),
+		*repeat,
+	)
+	return 0
+}
+
+func runGenerateMathInstructions(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("gen-math-instructions", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	dataDir := flags.String("data-dir", "", "directory containing arithmetic train.jsonl and val.jsonl")
+	outputDir := flags.String("output-dir", "", "directory to write instruction train.jsonl, val.jsonl, and meta.json")
+	systemPrompt := flags.String("system", textdata.DefaultMathInstructionSystem, "system prompt for instruction-format examples")
+	format := flags.String("format", textdata.MathInstructionFormatInstruction, "output format: instruction, chat, or compact")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *dataDir == "" || *outputDir == "" {
+		fmt.Fprintln(stderr, "data-dir and output-dir are required")
+		flags.Usage()
+		return 1
+	}
+	report, err := textdata.GenerateMathInstructionDataset(textdata.MathInstructionConfig{
+		DataDir:   *dataDir,
+		OutputDir: *outputDir,
+		System:    *systemPrompt,
+		Format:    *format,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "generate math instructions: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "wrote math instruction dataset to %s train=%d val=%d format=%s\n",
+		*outputDir,
+		report.TrainCount,
+		report.ValCount,
+		report.Format,
+	)
+	return 0
+}
+
 func runMixMathData(args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("mix-math-data", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -259,6 +414,127 @@ func runFetchTextData(args []string, stdout io.Writer, stderr io.Writer) int {
 	for _, result := range results {
 		fmt.Fprintf(stdout, "source=%q path=%q text_bytes=%d\n", result.Source, result.Path, result.TextBytes)
 	}
+	return 0
+}
+
+func runInspectTextData(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("inspect-text-data", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	textPaths := flags.String("text", "", "comma-separated text files or directories to inspect")
+	shortBytes := flags.Int("short-bytes", 256, "flag files below this cleaned byte size as short")
+	jsonOut := flags.Bool("json", false, "print full JSON report")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if strings.TrimSpace(*textPaths) == "" {
+		fmt.Fprintln(stderr, "text is required")
+		flags.Usage()
+		return 1
+	}
+	report, err := textdata.InspectTextDataset(splitCSV(*textPaths), *shortBytes)
+	if err != nil {
+		fmt.Fprintf(stderr, "inspect text data: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(report); err != nil {
+			fmt.Fprintf(stderr, "write report: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	fmt.Fprintf(stdout, "files=%d total_bytes=%d paragraphs=%d duplicate_paragraphs=%d empty_files=%d short_files=%d\n",
+		report.FileCount,
+		report.TotalBytes,
+		report.TotalParagraphs,
+		report.DuplicateParagraphs,
+		report.EmptyFiles,
+		len(report.ShortFiles),
+	)
+	for _, file := range report.LargestFiles {
+		fmt.Fprintf(stdout, "largest path=%q bytes=%d paragraphs=%d duplicates=%d\n", file.Path, file.Bytes, file.Paragraphs, file.DuplicateParagraphs)
+	}
+	return 0
+}
+
+func runDedupeTextData(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("dedupe-text-data", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	textPaths := flags.String("text", "", "comma-separated text files or directories to dedupe")
+	outputDir := flags.String("output-dir", "", "directory to write deduped .txt files")
+	minParagraphRunes := flags.Int("min-paragraph-runes", 1, "drop paragraphs shorter than this many runes")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if strings.TrimSpace(*textPaths) == "" || *outputDir == "" {
+		fmt.Fprintln(stderr, "text and output-dir are required")
+		flags.Usage()
+		return 1
+	}
+	if *minParagraphRunes < 0 {
+		fmt.Fprintln(stderr, "min-paragraph-runes cannot be negative")
+		return 1
+	}
+	report, err := textdata.DedupeTextDataset(splitCSV(*textPaths), textdata.DedupeConfig{
+		OutputDir:         *outputDir,
+		MinParagraphRunes: *minParagraphRunes,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "dedupe text data: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "input_files=%d output_files=%d input_paragraphs=%d output_paragraphs=%d duplicate_paragraphs=%d too_short_paragraphs=%d empty_output_files=%d output_dir=%s\n",
+		report.InputFiles,
+		report.OutputFiles,
+		report.InputParagraphs,
+		report.OutputParagraphs,
+		report.DuplicateParagraphs,
+		report.TooShortParagraphs,
+		report.EmptyOutputFiles,
+		*outputDir,
+	)
+	return 0
+}
+
+func runSplitTextData(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("split-text-data", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	textPaths := flags.String("text", "", "comma-separated text files or directories to split")
+	outputDir := flags.String("output-dir", "", "directory to write train/ and val/")
+	valRatio := flags.Float64("val-ratio", 0.1, "fraction of files assigned to validation")
+	seed := flags.Int64("seed", 1, "random seed for deterministic split")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if strings.TrimSpace(*textPaths) == "" || *outputDir == "" {
+		fmt.Fprintln(stderr, "text and output-dir are required")
+		flags.Usage()
+		return 1
+	}
+	report, err := textdata.SplitTextDataset(splitCSV(*textPaths), textdata.SplitConfig{
+		OutputDir: *outputDir,
+		ValRatio:  *valRatio,
+		Seed:      *seed,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "split text data: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "input_files=%d train_files=%d val_files=%d train_dir=%s val_dir=%s\n",
+		report.InputFiles,
+		report.TrainFiles,
+		report.ValFiles,
+		filepath.Join(*outputDir, "train"),
+		filepath.Join(*outputDir, "val"),
+	)
 	return 0
 }
 
@@ -632,6 +908,72 @@ func runEvalMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
+func runEvalInstructions(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("eval-instructions", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	checkpointPath := flags.String("checkpoint", "", "path to JSON model checkpoint")
+	instructionPath := flags.String("instructions", "", "path to instruction validation jsonl file")
+	maxTokens := flags.Int("max-tokens", 0, "max generated tokens; defaults to expected completion length plus slack")
+	showErrors := flags.Int("show-errors", 0, "print up to N incorrect examples")
+	errorsOut := flags.String("errors-out", "", "write all incorrect examples as JSON")
+	exampleLimit := flags.Int("limit", 0, "optional cap on loaded evaluation examples; 0 disables")
+	stop := flags.String("stop", "\\nUser:,\\n\\nUser:,\\nSystem:,\\n\\nSystem:", "comma-separated stop strings; supports \\n and \\t escapes")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *checkpointPath == "" || *instructionPath == "" {
+		fmt.Fprintln(stderr, "checkpoint and instructions are required")
+		flags.Usage()
+		return 1
+	}
+	if *exampleLimit < 0 {
+		fmt.Fprintln(stderr, "limit cannot be negative")
+		return 1
+	}
+
+	examples, err := textdata.LoadInstructionExamples([]string{*instructionPath})
+	if err != nil {
+		fmt.Fprintf(stderr, "load instruction examples: %v\n", err)
+		return 1
+	}
+	examples = limitInstructionExamples(examples, *exampleLimit)
+
+	engine, err := buildMathLMEngine(*checkpointPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "create checkpoint engine: %v\n", err)
+		return 1
+	}
+	tok := tokenizer.NewByteTokenizer()
+	tokenLimit := *maxTokens
+	if tokenLimit <= 0 {
+		tokenLimit = maxInstructionCompletionTokens(examples, tok) + 8
+	}
+	report, err := evaluateInstructionExamples(engine, examples, tok, instructionEvalOptions{
+		MaxTokens:     tokenLimit,
+		StopStrings:   parseStopStrings(*stop),
+		CollectErrors: *showErrors > 0 || *errorsOut != "",
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "evaluate instructions: %v\n", err)
+		return 1
+	}
+
+	writeInstructionEvalReport(stdout, report)
+	if report.Errors != nil {
+		writeInstructionEvalDebugReport(stdout, report, *showErrors)
+	}
+	if *errorsOut != "" {
+		if err := writeInstructionEvalErrorsFile(*errorsOut, report); err != nil {
+			fmt.Fprintf(stderr, "write errors: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "errors_out=%s\n", *errorsOut)
+	}
+	return 0
+}
+
 func runGenerateMath(args []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("generate-math", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -707,6 +1049,55 @@ func runGenerateCheckpoint(args []string, stdout io.Writer, stderr io.Writer) in
 	}
 	fmt.Fprintln(stdout, output)
 	return 0
+}
+
+func runExportCheckpoint(args []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("export-checkpoint", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	checkpointPath := flags.String("checkpoint", "", "path to source JSON model checkpoint")
+	outputPath := flags.String("output", "", "path to write exported JSON model checkpoint")
+	stripOptimizer := flags.Bool("strip-optimizer", true, "remove Adam optimizer state for inference-only release artifacts")
+	if err := flags.Parse(args); err != nil {
+		fmt.Fprintf(stderr, "parse flags: %v\n", err)
+		return 2
+	}
+	if *checkpointPath == "" || *outputPath == "" {
+		fmt.Fprintln(stderr, "checkpoint and output are required")
+		flags.Usage()
+		return 1
+	}
+
+	trainer, err := mathlm.LoadAnyCheckpoint(*checkpointPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "load checkpoint: %v\n", err)
+		return 1
+	}
+	if *stripOptimizer {
+		stripAnyTrainerOptimizer(trainer)
+	}
+	if err := os.MkdirAll(filepath.Dir(*outputPath), 0o755); err != nil {
+		fmt.Fprintf(stderr, "create output dir: %v\n", err)
+		return 1
+	}
+	if err := mathlm.SaveAnyCheckpoint(*outputPath, trainer); err != nil {
+		fmt.Fprintf(stderr, "write checkpoint: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "exported checkpoint input=%s output=%s model=%s strip_optimizer=%t\n", *checkpointPath, *outputPath, trainer.ModelType, *stripOptimizer)
+	return 0
+}
+
+func stripAnyTrainerOptimizer(trainer *mathlm.AnyTrainer) {
+	if trainer == nil {
+		return
+	}
+	if trainer.MLP != nil {
+		trainer.MLP.Adam = nil
+	}
+	if trainer.Transformer != nil {
+		trainer.Transformer.Adam = nil
+	}
 }
 
 func runGenerateGPT2(args []string, stdout io.Writer, stderr io.Writer) int {
@@ -921,8 +1312,9 @@ func runServe(args []string, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 
 	addr := flags.String("addr", "localhost:8080", "address for the Aurelius web server")
-	backend := flags.String("backend", "auto", "model backend: auto, toy, gpt2, or mathlm")
-	checkpointPath := flags.String("checkpoint", "", "path to mathlm JSON checkpoint for -backend mathlm")
+	backend := flags.String("backend", "auto", "model backend: auto, toy, gpt2, mathlm, or math-router")
+	checkpointPath := flags.String("checkpoint", "", "path to mathlm JSON checkpoint for -backend mathlm or arithmetic checkpoint for -backend math-router")
+	derivativeCheckpointPath := flags.String("derivative-checkpoint", "", "path to derivative mathlm JSON checkpoint for -backend math-router")
 	configPath := flags.String("model-config", "", "path to GPT-2 config.json")
 	weightsPath := flags.String("weights", "", "path to GPT-2 model.safetensors")
 	vocabPath := flags.String("vocab", "", "path to GPT-2 vocab.json")
@@ -943,7 +1335,7 @@ func runServe(args []string, stderr io.Writer) int {
 		weightsPath: *weightsPath,
 		vocabPath:   *vocabPath,
 		mergesPath:  *mergesPath,
-	}, *checkpointPath)
+	}, *checkpointPath, *derivativeCheckpointPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "create engine: %v\n", err)
 		return 1
@@ -1136,8 +1528,8 @@ func (g generatorWithDefaults) GenerateWithOptions(prompt string, options runtim
 	return g.underlying.GenerateWithOptions(prompt, options)
 }
 
-func buildServeGenerator(backend, baseDir string, paths gpt2AssetPaths, checkpointPath string) (server.Generator, string, error) {
-	selectedBackend, err := resolveServeBackend(backend, baseDir, paths, checkpointPath)
+func buildServeGenerator(backend, baseDir string, paths gpt2AssetPaths, checkpointPath string, derivativeCheckpointPath string) (server.Generator, string, error) {
+	selectedBackend, err := resolveServeBackend(backend, baseDir, paths, checkpointPath, derivativeCheckpointPath)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1161,6 +1553,26 @@ func buildServeGenerator(backend, baseDir string, paths gpt2AssetPaths, checkpoi
 			underlying:  engine,
 			stopStrings: []string{"\nUser:", "\n\nUser:"},
 		}, selectedBackend, nil
+	case "math-router":
+		if checkpointPath == "" {
+			return nil, "", fmt.Errorf("checkpoint is required for math-router backend")
+		}
+		if derivativeCheckpointPath == "" {
+			return nil, "", fmt.Errorf("derivative-checkpoint is required for math-router backend")
+		}
+		arithmeticEngine, err := buildMathLMEngine(checkpointPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("create arithmetic engine: %w", err)
+		}
+		derivativeEngine, err := buildMathLMEngine(derivativeCheckpointPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("create derivative engine: %w", err)
+		}
+		return mathrouter.Router{
+			Arithmetic:  arithmeticEngine,
+			Derivative:  derivativeEngine,
+			PreferModel: true,
+		}, selectedBackend, nil
 	case "gpt2":
 		resolved := resolveGPT2AssetPaths(baseDir, paths)
 		assets, err := loadGPT2Assets(resolved.configPath, resolved.weightsPath, resolved.vocabPath, resolved.mergesPath)
@@ -1180,11 +1592,14 @@ func buildServeGenerator(backend, baseDir string, paths gpt2AssetPaths, checkpoi
 	}
 }
 
-func resolveServeBackend(requested, baseDir string, paths gpt2AssetPaths, checkpointPath string) (string, error) {
+func resolveServeBackend(requested, baseDir string, paths gpt2AssetPaths, checkpointPath string, derivativeCheckpointPath string) (string, error) {
 	switch requested {
-	case "toy", "gpt2", "mathlm":
+	case "toy", "gpt2", "mathlm", "math-router":
 		return requested, nil
 	case "auto", "":
+		if checkpointPath != "" && derivativeCheckpointPath != "" {
+			return "math-router", nil
+		}
 		if checkpointPath != "" {
 			return "mathlm", nil
 		}
@@ -1194,7 +1609,7 @@ func resolveServeBackend(requested, baseDir string, paths gpt2AssetPaths, checkp
 		}
 		return "toy", nil
 	default:
-		return "", fmt.Errorf("backend must be one of auto, toy, gpt2, or mathlm")
+		return "", fmt.Errorf("backend must be one of auto, toy, gpt2, mathlm, or math-router")
 	}
 }
 
@@ -1270,6 +1685,20 @@ func mergeStopStrings(existing, defaults []string) []string {
 
 func serveGeneratePolicy(backend string) server.GeneratePolicy {
 	switch backend {
+	case "math-router":
+		return server.GeneratePolicy{
+			DefaultMaxTokens:   24,
+			MaxTokensCap:       64,
+			DefaultTemperature: 0,
+			DefaultTopK:        1,
+			MaxTopK:            1,
+			MaxMessages:        4,
+			MaxMessageRunes:    512,
+			MaxPromptRunes:     1024,
+			DefaultStopStrings: []string{"\nUser:", "\n\nUser:", "\nAssistant:", "\n\nAssistant:"},
+			MaxStopStrings:     8,
+			MaxStopRunes:       64,
+		}
 	case "gpt2":
 		return server.GeneratePolicy{
 			DefaultMaxTokens:   8,
@@ -1393,6 +1822,136 @@ func writeEvalReport(stdout io.Writer, report mathlm.EvalReport) {
 	}
 }
 
+type mathEvalErrorReplayReport struct {
+	Total    int                `json:"total"`
+	Correct  int                `json:"correct"`
+	Accuracy float64            `json:"accuracy"`
+	Errors   []mathlm.EvalError `json:"errors"`
+}
+
+type mathErrorReplayMetadata struct {
+	SourceErrors     string  `json:"source_errors"`
+	SourceTotal      int     `json:"source_total"`
+	SourceCorrect    int     `json:"source_correct"`
+	SourceAccuracy   float64 `json:"source_accuracy"`
+	InputErrors      int     `json:"input_errors"`
+	UniqueErrors     int     `json:"unique_errors"`
+	TrainCount       int     `json:"train_count"`
+	ValCount         int     `json:"val_count"`
+	Repeat           int     `json:"repeat"`
+	ValRatio         float64 `json:"val_ratio"`
+	Seed             int64   `json:"seed"`
+	AnswerSource     string  `json:"answer_source"`
+	ReplayCompletion string  `json:"replay_completion"`
+}
+
+func loadMathEvalErrorReplayReport(path string) (mathEvalErrorReplayReport, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return mathEvalErrorReplayReport{}, fmt.Errorf("read errors file %q: %w", path, err)
+	}
+	var report mathEvalErrorReplayReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		return mathEvalErrorReplayReport{}, fmt.Errorf("parse errors file %q: %w", path, err)
+	}
+	return report, nil
+}
+
+func buildErrorReplayExamples(errors []mathlm.EvalError) []arithmetic.Example {
+	seen := make(map[string]bool)
+	examples := make([]arithmetic.Example, 0, len(errors))
+	for _, evalError := range errors {
+		prompt := strings.TrimSpace(evalError.Prompt)
+		expected := strings.TrimSpace(evalError.Expected)
+		if prompt == "" || expected == "" {
+			continue
+		}
+		answer := expected
+		if task, ok := mathrouter.Normalize(evalError.Prompt); ok && task.Solved {
+			answer = task.Answer
+		}
+		key := prompt + "\x00" + answer
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		examples = append(examples, arithmetic.Example{
+			Prompt:          evalError.Prompt,
+			Completion:      answer,
+			Answer:          answer,
+			Operation:       evalError.Operation,
+			Level:           evalError.Level,
+			MinOperand:      evalError.MinOperand,
+			MaxOperand:      evalError.MaxOperand,
+			AnswerDigits:    evalError.AnswerDigits,
+			SmallDifference: evalError.SmallDifference,
+			RequiresCarry:   evalError.RequiresCarry,
+			RequiresBorrow:  evalError.RequiresBorrow,
+			Template:        evalError.Template,
+			ReasoningStyle:  replayReasoningStyle(evalError.ReasoningStyle),
+		})
+	}
+	return examples
+}
+
+func replayReasoningStyle(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "direct"
+	}
+	return value
+}
+
+func splitReplayExamples(examples []arithmetic.Example, valRatio float64) ([]arithmetic.Example, []arithmetic.Example) {
+	if len(examples) <= 1 || valRatio == 0 {
+		return append([]arithmetic.Example(nil), examples...), nil
+	}
+	valCount := int(math.Round(float64(len(examples)) * valRatio))
+	if valCount < 1 {
+		valCount = 1
+	}
+	if valCount >= len(examples) {
+		valCount = len(examples) - 1
+	}
+	val := append([]arithmetic.Example(nil), examples[:valCount]...)
+	train := append([]arithmetic.Example(nil), examples[valCount:]...)
+	return train, val
+}
+
+func repeatExamples(examples []arithmetic.Example, repeat int) []arithmetic.Example {
+	repeated := make([]arithmetic.Example, 0, len(examples)*repeat)
+	for i := 0; i < repeat; i++ {
+		repeated = append(repeated, examples...)
+	}
+	return repeated
+}
+
+func writeArithmeticJSONL(path string, examples []arithmetic.Example) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create %q: %w", path, err)
+	}
+	defer file.Close()
+	encoder := json.NewEncoder(file)
+	for _, example := range examples {
+		if err := encoder.Encode(example); err != nil {
+			return fmt.Errorf("write %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func writeJSONFile(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal %q: %w", path, err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write %q: %w", path, err)
+	}
+	return nil
+}
+
 func writeEvalDebugReport(stdout io.Writer, report mathlm.EvalReport, showErrors int) {
 	for _, template := range sortedStringKeys(report.ByTemplate) {
 		group := report.ByTemplate[template]
@@ -1464,6 +2023,117 @@ func writeEvalErrorsFile(path string, report mathlm.EvalReport) error {
 	return nil
 }
 
+type instructionEvalOptions struct {
+	MaxTokens     int
+	StopStrings   []string
+	CollectErrors bool
+}
+
+type instructionEvalReport struct {
+	Total     int                    `json:"total"`
+	Correct   int                    `json:"correct"`
+	Accuracy  float64                `json:"accuracy"`
+	MaxTokens int                    `json:"max_tokens"`
+	Errors    []instructionEvalError `json:"errors,omitempty"`
+}
+
+type instructionEvalError struct {
+	Index     int    `json:"index"`
+	Prompt    string `json:"prompt"`
+	Expected  string `json:"expected"`
+	Generated string `json:"generated"`
+}
+
+func evaluateInstructionExamples(engine generateWithOptions, examples []textdata.InstructionExample, tok tokenizer.Tokenizer, options instructionEvalOptions) (instructionEvalReport, error) {
+	if engine == nil {
+		return instructionEvalReport{}, fmt.Errorf("generator is required")
+	}
+	if tok == nil {
+		return instructionEvalReport{}, fmt.Errorf("tokenizer is required")
+	}
+	if options.MaxTokens <= 0 {
+		return instructionEvalReport{}, fmt.Errorf("max tokens must be positive")
+	}
+	report := instructionEvalReport{
+		Total:     len(examples),
+		MaxTokens: options.MaxTokens,
+	}
+	for i, example := range examples {
+		prompt, expected := example.PromptCompletion()
+		output, err := engine.GenerateWithOptions(prompt, runtime.GenerateOptions{
+			MaxTokens:   options.MaxTokens,
+			TopK:        1,
+			StopStrings: options.StopStrings,
+		})
+		if err != nil {
+			return instructionEvalReport{}, fmt.Errorf("generate instruction %d: %w", i+1, err)
+		}
+		generated := normalizeInstructionGenerated(output, prompt)
+		expected = strings.TrimSpace(expected)
+		if generated == expected {
+			report.Correct++
+			continue
+		}
+		if options.CollectErrors {
+			report.Errors = append(report.Errors, instructionEvalError{
+				Index:     i + 1,
+				Prompt:    prompt,
+				Expected:  expected,
+				Generated: generated,
+			})
+		}
+	}
+	if report.Total > 0 {
+		report.Accuracy = float64(report.Correct) / float64(report.Total)
+	}
+	return report, nil
+}
+
+func normalizeInstructionGenerated(output string, prompt string) string {
+	generated := strings.TrimPrefix(output, prompt)
+	for _, marker := range []string{"\nUser:", "\n\nUser:", "\nSystem:", "\n\nSystem:"} {
+		if idx := strings.Index(generated, marker); idx >= 0 {
+			generated = generated[:idx]
+		}
+	}
+	if idx := strings.Index(generated, "\n"); idx >= 0 {
+		generated = generated[:idx]
+	}
+	return strings.TrimSpace(generated)
+}
+
+func writeInstructionEvalReport(stdout io.Writer, report instructionEvalReport) {
+	fmt.Fprintf(stdout, "accuracy=%.4f correct=%d total=%d max_tokens=%d\n", report.Accuracy, report.Correct, report.Total, report.MaxTokens)
+}
+
+func writeInstructionEvalDebugReport(stdout io.Writer, report instructionEvalReport, showErrors int) {
+	if showErrors <= 0 {
+		return
+	}
+	limit := min(showErrors, len(report.Errors))
+	for i := 0; i < limit; i++ {
+		err := report.Errors[i]
+		fmt.Fprintf(stdout, "error[%d] index=%d prompt=%q expected=%q generated=%q\n",
+			i+1,
+			err.Index,
+			err.Prompt,
+			err.Expected,
+			err.Generated,
+		)
+	}
+}
+
+func writeInstructionEvalErrorsFile(path string, report instructionEvalReport) error {
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal instruction eval errors: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write instruction eval errors file: %w", err)
+	}
+	return nil
+}
+
 func periodicCheckpointPath(basePath string, step int) string {
 	ext := filepath.Ext(basePath)
 	stem := strings.TrimSuffix(basePath, ext)
@@ -1506,6 +2176,13 @@ func loadArithmeticDatasets(dataDir string) ([]arithmetic.Example, []arithmetic.
 }
 
 func limitExamples(examples []arithmetic.Example, limit int) []arithmetic.Example {
+	if limit <= 0 || limit >= len(examples) {
+		return examples
+	}
+	return examples[:limit]
+}
+
+func limitInstructionExamples(examples []textdata.InstructionExample, limit int) []textdata.InstructionExample {
 	if limit <= 0 || limit >= len(examples) {
 		return examples
 	}
@@ -1599,6 +2276,21 @@ func maxCompletionTokens(examples []arithmetic.Example) int {
 		length := len(example.Completion) + 1
 		if length > maxTokens {
 			maxTokens = length
+		}
+	}
+	return maxTokens
+}
+
+func maxInstructionCompletionTokens(examples []textdata.InstructionExample, tok tokenizer.Tokenizer) int {
+	maxTokens := 1
+	for _, example := range examples {
+		_, completion := example.PromptCompletion()
+		tokens, err := tok.Encode(completion + "\n")
+		if err != nil {
+			continue
+		}
+		if len(tokens) > maxTokens {
+			maxTokens = len(tokens)
 		}
 	}
 	return maxTokens
