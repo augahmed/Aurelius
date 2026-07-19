@@ -38,13 +38,22 @@ Open `http://localhost:8080`. Without checkpoint flags, the server uses the buil
 
 The highest-accuracy math path is the `math-router` backend. It normalizes supported user prompts into direct model prompts, asks the trained specialist checkpoint first, and falls back to deterministic math evaluation when the model answer does not exactly match the computed result.
 
-Place release checkpoints under `./artifacts/` or pass explicit paths:
+Plain `go run ./cmd/aurelius serve` does not load the released math checkpoints. Public users need to download the release assets and pass them explicitly.
+
+Download these release checkpoint files into `./artifacts/`:
+
+```text
+artifacts/math-router-arithmetic-v4b.json
+artifacts/math-router-derivative-full-v2.json
+```
+
+Then run:
 
 ```bash
 go run ./cmd/aurelius serve \
   -backend math-router \
-  -checkpoint ./artifacts/math-transformer-2layer-l1-l4-direct-v4b.json \
-  -derivative-checkpoint ./artifacts/math-transformer-2layer-l7-derivative-full-v2.json
+  -checkpoint ./artifacts/math-router-arithmetic-v4b.json \
+  -derivative-checkpoint ./artifacts/math-router-derivative-full-v2.json
 ```
 
 This route is intended for precise supported math tasks, not unrestricted general chat. It is appropriate for arithmetic, multiplication, and the derivative formats covered by the training and router code.
@@ -70,10 +79,10 @@ Recommended release checks:
 ```bash
 go test ./...
 
-rg -n "/Users|C:\\\\Users|private|secret|token|api[_-]?key|password|email|Bearer|BEGIN .* PRIVATE KEY" ./release-checkpoints
+grep -RInE '/Users|C:\\Users|private|secret|api[_-]?key|password|email|Bearer|BEGIN .* PRIVATE KEY' ./release-checkpoints
 ```
 
-Expected string-scan matches are limited to model field names such as `token_embeddings`.
+Expected result: no output.
 
 ## Training Smoke Test
 
