@@ -21,7 +21,7 @@ Active research prototype. The codebase is designed for correctness, inspection,
 Clone the repository and run the test suite:
 
 ```bash
-git clone https://github.com/<your-user>/Aurelius.git
+git clone https://github.com/augahmed/Aurelius.git
 cd Aurelius
 go test ./...
 ```
@@ -70,7 +70,7 @@ Recommended release checks:
 ```bash
 go test ./...
 
-rg -n "august|ahmed|/Users|Aurelius|http|https|private|secret|token|api[_-]?key|password|email|@" ./release-checkpoints
+rg -n "/Users|C:\\\\Users|private|secret|token|api[_-]?key|password|email|Bearer|BEGIN .* PRIVATE KEY" ./release-checkpoints
 ```
 
 Expected string-scan matches are limited to model field names such as `token_embeddings`.
@@ -258,3 +258,7 @@ Cache-aware generation is optional per model. `runtime.Engine` detects models th
 The local web UI uses the same runtime engine and generation options as the CLI. Chat history is stored in the browser rather than persisted server-side.
 
 The `generate-gpt2` path runs a non-cached GPT-2 style forward pass from loaded safetensors weights, while `inspect-gpt2-next` and `validate-gpt2` support parity validation. The default CLI and web UI still use the toy transformer unless a specific backend or checkpoint is provided.
+
+## License
+
+This project is released under the MIT License. See [LICENSE](LICENSE).

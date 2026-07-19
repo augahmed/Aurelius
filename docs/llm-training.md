@@ -7,7 +7,7 @@ Aurelius can now train byte-tokenized transformer checkpoints on raw text and in
 Fetch web pages into local cleaned text first:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius fetch-text-data \
+go run ./cmd/aurelius fetch-text-data \
   -urls "https://example.com/math-lesson,https://example.com/calculus-notes" \
   -output-dir ./data/text/web-math \
   -max-pages 20 \
@@ -18,7 +18,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius fetch-tex
 For larger source lists:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius fetch-text-data \
+go run ./cmd/aurelius fetch-text-data \
   -url-file ./data/text/math-urls.txt \
   -output-dir ./data/text/web-math
 ```
@@ -28,14 +28,14 @@ Only fetch pages you are allowed to use. The command writes cleaned `.txt` files
 Inspect the fetched text before training:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius inspect-text-data \
+go run ./cmd/aurelius inspect-text-data \
   -text ./data/text/web-math
 ```
 
 Remove duplicate paragraphs and very short fragments:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius dedupe-text-data \
+go run ./cmd/aurelius dedupe-text-data \
   -text ./data/text/web-math \
   -output-dir ./data/text/web-math-deduped \
   -min-paragraph-runes 20
@@ -44,7 +44,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius dedupe-te
 Create a deterministic train/validation split:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius split-text-data \
+go run ./cmd/aurelius split-text-data \
   -text ./data/text/web-math-deduped \
   -output-dir ./data/text/web-math-split \
   -val-ratio 0.1 \
@@ -54,7 +54,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius split-tex
 Use `train-text` with one or more `.txt` or `.md` files or directories:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius train-text \
+go run ./cmd/aurelius train-text \
   -text ./data/text/web-math-split/train \
   -val-text ./data/text/web-math-split/val \
   -checkpoint ./artifacts/aurelius-text.json \
@@ -93,7 +93,7 @@ or instruction fields:
 You can convert generated arithmetic datasets into instruction examples:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius gen-math-data \
+go run ./cmd/aurelius gen-math-data \
   -output-dir ./data/arithmetic-instruct-source \
   -operations add,sub,mul,derivative \
   -levels 1,2,3,4,7 \
@@ -102,7 +102,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius gen-math-
   -train-count 20000 \
   -val-count 2000
 
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius gen-math-instructions \
+go run ./cmd/aurelius gen-math-instructions \
   -data-dir ./data/arithmetic-instruct-source \
   -output-dir ./data/instructions/math \
   -format compact
@@ -111,7 +111,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius gen-math-
 Resume from a pretrained checkpoint:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius train-text \
+go run ./cmd/aurelius train-text \
   -instructions ./data/instructions/math/train.jsonl \
   -val-instructions ./data/instructions/math/val.jsonl \
   -resume ./artifacts/aurelius-text.json \
@@ -132,7 +132,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius train-tex
 Use a local checkpoint directly:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius generate-checkpoint \
+go run ./cmd/aurelius generate-checkpoint \
   -checkpoint ./artifacts/aurelius-instruct.json \
   -prompt $'User: What is 7 * 8?\n\nAssistant:' \
   -max-tokens 64 \
@@ -148,7 +148,7 @@ Use greedy decoding with `-temperature 0 -top-k 0`. Use `-top-k 40 -temperature 
 Evaluate instruction-tuned checkpoints against the same prompt wrapper used for training:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius eval-instructions \
+go run ./cmd/aurelius eval-instructions \
   -checkpoint ./artifacts/aurelius-instruct.json \
   -instructions ./data/instructions/math/val.jsonl \
   -show-errors 20 \
@@ -160,7 +160,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius eval-inst
 Serve a checkpoint through `/generate`:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius serve \
+go run ./cmd/aurelius serve \
   -backend mathlm \
   -checkpoint ./artifacts/aurelius-instruct.json \
   -addr localhost:8080
@@ -171,7 +171,7 @@ The JSON API accepts `prompt`, `messages`, `max_tokens`, `temperature`, `top_k`,
 For the current math-centered path, prefer the deterministic router instead of instruction-tuning one checkpoint to understand every chat wrapper. It normalizes user text into the direct prompt format, solves supported integer arithmetic and polynomial derivatives directly, and routes unsupported forms to specialist checkpoints:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius serve \
+go run ./cmd/aurelius serve \
   -backend math-router \
   -checkpoint ./artifacts/math-transformer-2layer-l1-l4-direct-v4b.json \
   -derivative-checkpoint ./artifacts/math-transformer-2layer-l7-derivative-full-v2.json \
@@ -185,7 +185,7 @@ Examples accepted by the router include `What is 7 * 8?`, `Can you solve 7 times
 Keep evaluating math datasets after text or instruction tuning:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius eval-math \
+go run ./cmd/aurelius eval-math \
   -checkpoint ./artifacts/aurelius-instruct.json \
   -data ./data/arithmetic-l1-l4-direct/val.jsonl \
   -max-tokens 4 \

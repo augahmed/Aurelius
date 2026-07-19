@@ -10,7 +10,7 @@ Use two separate measurements:
 Evaluate the arithmetic checkpoint against the broad level 1-4 validation set:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius eval-math \
+go run ./cmd/aurelius eval-math \
   -checkpoint ./artifacts/math-transformer-2layer-l1-l4-direct-v4b.json \
   -data ./data/arithmetic-l1-l4-direct-balanced/val.jsonl \
   -max-tokens 4 \
@@ -21,7 +21,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius eval-math
 Evaluate multiplication only:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius eval-math \
+go run ./cmd/aurelius eval-math \
   -checkpoint ./artifacts/math-transformer-2layer-l1-l4-direct-v4b.json \
   -data ./data/arithmetic-l4-direct/val.jsonl \
   -max-tokens 4 \
@@ -32,7 +32,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius eval-math
 Evaluate derivative checkpoints separately:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius eval-math \
+go run ./cmd/aurelius eval-math \
   -checkpoint ./artifacts/math-transformer-2layer-l7-derivative-full-v2.json \
   -data ./data/arithmetic-l7-derivative/val.jsonl \
   -max-tokens 24 \
@@ -45,7 +45,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius eval-math
 The web path should be checked with:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go test ./internal/mathrouter
+go test ./internal/mathrouter
 ```
 
 This covers exact-answer edge cases after natural-language normalization. In the web backend, the router tries the model first and returns the model answer when it exactly matches the deterministic answer; otherwise it falls back to the deterministic answer. Add new cases there whenever the website gives a surprising answer.
@@ -55,7 +55,7 @@ This covers exact-answer edge cases after natural-language normalization. In the
 Use `gen-math-error-replay` to turn model misses into corrected replay data. This keeps the failed prompts but replaces the completion with the router-corrected answer when the router supports the expression, otherwise with the eval expected answer.
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius gen-math-error-replay \
+go run ./cmd/aurelius gen-math-error-replay \
   -errors ./artifacts/math-transformer-2layer-l1-l4-direct-v4b-errors.json \
   -output-dir ./data/arithmetic-l1-l4-v4b-error-replay \
   -repeat 8 \
@@ -66,7 +66,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius gen-math-
 Mix the replay data back into the broad dataset so the model does not overfit only the misses:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius mix-math-data \
+go run ./cmd/aurelius mix-math-data \
   -output-dir ./data/arithmetic-l1-l4-direct-balanced-v4b-replay \
   -inputs ./data/arithmetic-l1-l4-direct-balanced:1,./data/arithmetic-l1-l4-v4b-error-replay:8 \
   -seed 2
@@ -75,7 +75,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius mix-math-
 Fine-tune from the previous checkpoint with a small learning rate:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius train-math \
+go run ./cmd/aurelius train-math \
   -resume ./artifacts/math-transformer-2layer-l1-l4-direct-v4b.json \
   -data-dir ./data/arithmetic-l1-l4-direct-balanced-v4b-replay \
   -checkpoint ./artifacts/math-transformer-2layer-l1-l4-direct-v4c.json \
@@ -98,11 +98,11 @@ Do not publish the entire `artifacts/` directory. It can contain intermediate ch
 Export release checkpoints without Adam optimizer state:
 
 ```sh
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius export-checkpoint \
+go run ./cmd/aurelius export-checkpoint \
   -checkpoint ./artifacts/math-transformer-2layer-l1-l4-direct-v4b.json \
   -output ./release-checkpoints/math-router-arithmetic-v4b.json
 
-env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius export-checkpoint \
+go run ./cmd/aurelius export-checkpoint \
   -checkpoint ./artifacts/math-transformer-2layer-l7-derivative-full-v2.json \
   -output ./release-checkpoints/math-router-derivative-full-v2.json
 ```
@@ -110,7 +110,7 @@ env GOCACHE=/Users/augustahmed/Aurelius/.gocache go run ./cmd/aurelius export-ch
 Before attaching these files to a GitHub Release, scan them for private strings:
 
 ```sh
-rg -n "august|ahmed|/Users|Aurelius|http|https|private|secret|token|api[_-]?key|password|email|@" ./release-checkpoints
+rg -n "/Users|C:\\\\Users|private|secret|token|api[_-]?key|password|email|Bearer|BEGIN .* PRIVATE KEY" ./release-checkpoints
 ```
 
 Expected result: no matches except model field names such as `token_embeddings`. The exported checkpoints should contain numeric weights, model config, and `adam: null`, not training examples or local paths.

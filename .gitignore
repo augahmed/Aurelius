@@ -11,6 +11,7 @@ dist/
 *.test
 *.out
 coverage.out
+*.log
 
 # Go workspace
 vendor/
@@ -19,16 +20,25 @@ vendor/
 # Local Python tooling
 .venv/
 .venv-*/
+__pycache__/
+
+# Local environment files
+.env
+.env.*
+!.env.example
 
 # Generated training outputs and checkpoints
 artifacts/
 release-checkpoints/
 data/
+tmp/
 tmp_arithmetic_data/
 tmp_arithmetic_small/
 tmp_arithmetic_*.json
 
 # Editors and OS files
 .DS_Store
+.AppleDouble
+.LSOverride
 .idea/
 .vscode/
