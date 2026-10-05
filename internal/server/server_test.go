@@ -2,14 +2,71 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/augahmed/aurelius/internal/mathrouter"
 	"github.com/augahmed/aurelius/internal/runtime"
 	"github.com/augahmed/aurelius/internal/textutil"
 )
+
+func TestServerMathRouterToggle(t *testing.T) {
+	for _, task := range []struct{ name, prompt, normalized, answer string }{
+		{"arithmetic", "What is 7 * 8?", "7 * 8 = ", "56"},
+		{"derivative", "What is the derivative of x^2?", "Derrivative: x^2 ", "2x"},
+	} {
+		for _, setting := range []struct {
+			name, field string
+			disabled    bool
+		}{
+			{"omitted", "", false},
+			{"enabled", `,"use_math_router":true`, false},
+			{"disabled", `,"use_math_router":false`, true},
+		} {
+			for _, fail := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/error=%t", task.name, setting.name, fail), func(t *testing.T) {
+					model := &fakeGenerator{outputSuffix: "wrong answer"}
+					if fail {
+						model.err = fmt.Errorf("model failed")
+					}
+					srv := New(mathrouter.Router{Arithmetic: model, Derivative: model, PreferModel: true})
+					body := fmt.Sprintf(`{"messages":[{"role":"user","content":%q}],"max_tokens":16,"temperature":0.7,"top_k":40%s}`, task.prompt, setting.field)
+					rec := httptest.NewRecorder()
+					srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/generate", strings.NewReader(body)))
+					if model.prompt != task.normalized {
+						t.Fatalf("model prompt = %q, want %q", model.prompt, task.normalized)
+					}
+					if setting.disabled && (model.options.Temperature != 0.7 || model.options.TopK != 40) {
+						t.Fatalf("model-only sampling options = %+v", model.options)
+					}
+					if setting.disabled && fail {
+						if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "model failed") {
+							t.Fatalf("status = %d, body = %q, want model error", rec.Code, rec.Body.String())
+						}
+						return
+					}
+					if rec.Code != http.StatusOK {
+						t.Fatalf("status = %d, body = %q", rec.Code, rec.Body.String())
+					}
+					var response GenerateResponse
+					if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+						t.Fatal(err)
+					}
+					want := task.answer
+					if setting.disabled {
+						want = "wrong answer"
+					}
+					if response.Output != want {
+						t.Fatalf("output = %q, want %q", response.Output, want)
+					}
+				})
+			}
+		}
+	}
+}
 
 func TestServerHealth(t *testing.T) {
 	srv := New(nil)

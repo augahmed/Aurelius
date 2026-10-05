@@ -204,6 +204,26 @@ func TestRouterUsesDeterministicDerivativeByDefaultWhenSupported(t *testing.T) {
 	}
 }
 
+func TestRouterModelOnlyBypassesDefaultSolver(t *testing.T) {
+	for _, configured := range []bool{true, false} {
+		generator := &recordingGenerator{output: "7 * 8 = 55\n"}
+		router := Router{}
+		if configured {
+			router.Arithmetic = generator
+		}
+		output, err := router.GenerateWithOptions("7 * 8", runtime.GenerateOptions{DisableMathRouter: true})
+		if !configured {
+			if err == nil {
+				t.Fatal("expected missing generator error instead of solver fallback")
+			}
+			continue
+		}
+		if err != nil || output != "7 * 855" || generator.prompt != "7 * 8 = " {
+			t.Fatalf("output = %q, err = %v, model prompt = %q", output, err, generator.prompt)
+		}
+	}
+}
+
 func TestRouterUsesModelFirstWhenAnswerMatches(t *testing.T) {
 	arithmetic := &recordingGenerator{output: "7 * 8 = 56\nextra"}
 	router := Router{

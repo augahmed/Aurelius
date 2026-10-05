@@ -82,7 +82,7 @@ func (r Router) GenerateWithOptions(prompt string, options runtime.GenerateOptio
 	if task.Route == RouteDerivative {
 		generator = r.Derivative
 	}
-	if task.Solved && (!r.PreferModel || generator == nil) {
+	if !options.DisableMathRouter && task.Solved && (!r.PreferModel || generator == nil) {
 		return prompt + task.Answer, nil
 	}
 	if generator == nil {
@@ -91,12 +91,12 @@ func (r Router) GenerateWithOptions(prompt string, options runtime.GenerateOptio
 
 	completion, err := r.generateTaskCompletion(generator, task, options)
 	if err != nil {
-		if task.Solved {
+		if task.Solved && !options.DisableMathRouter {
 			return prompt + task.Answer, nil
 		}
 		return "", err
 	}
-	if task.Solved && !answersMatch(completion, task.Answer) {
+	if !options.DisableMathRouter && task.Solved && !answersMatch(completion, task.Answer) {
 		return prompt + task.Answer, nil
 	}
 	return prompt + completion, nil
@@ -104,8 +104,10 @@ func (r Router) GenerateWithOptions(prompt string, options runtime.GenerateOptio
 
 func (r Router) generateTaskCompletion(generator Generator, task Task, options runtime.GenerateOptions) (string, error) {
 	innerOptions := options
-	innerOptions.TopK = 1
-	innerOptions.Temperature = 0
+	if !options.DisableMathRouter {
+		innerOptions.TopK = 1
+		innerOptions.Temperature = 0
+	}
 	if innerOptions.MaxTokens <= 0 {
 		innerOptions.MaxTokens = 24
 	}

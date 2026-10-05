@@ -18,12 +18,14 @@ type Engine struct {
 }
 
 type GenerateOptions struct {
-	MaxTokens   int
-	UseCache    bool
-	StopTokens  []int
-	StopStrings []string
-	Temperature float64
-	TopK        int
+	// DisableMathRouter bypasses deterministic answers and corrections in the math backend.
+	DisableMathRouter bool
+	MaxTokens         int
+	UseCache          bool
+	StopTokens        []int
+	StopStrings       []string
+	Temperature       float64
+	TopK              int
 }
 
 func NewEngine(tok tokenizer.Tokenizer, mdl model.Model, samp sampler.Sampler) (*Engine, error) {

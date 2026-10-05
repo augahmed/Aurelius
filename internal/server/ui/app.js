@@ -8,6 +8,7 @@ const maxTokensInput = document.getElementById("max-tokens");
 const temperatureInput = document.getElementById("temperature");
 const topKInput = document.getElementById("top-k");
 const useCacheInput = document.getElementById("use-cache");
+const useMathRouterInput = document.getElementById("use-math-router");
 const submitButton = document.getElementById("submit-button");
 const statusText = document.getElementById("status-text");
 const clearHistoryButton = document.getElementById("clear-history");
@@ -33,6 +34,7 @@ chatForm.addEventListener("submit", async (event) => {
   const temperature = normalizeTemperature();
   const topK = normalizeTopK();
   const useCache = useCacheInput.checked;
+  const useMathRouter = useMathRouterInput.checked;
 
   if (!prompt) {
     setStatus("Enter a prompt to continue.", true);
@@ -71,6 +73,7 @@ chatForm.addEventListener("submit", async (event) => {
         temperature,
         top_k: topK,
         use_cache: useCache,
+        use_math_router: useMathRouter,
         messages: state.messages,
       }),
     });
@@ -108,6 +111,7 @@ promptInput.addEventListener("keydown", (event) => {
 });
 
 promptInput.addEventListener("input", resizePromptInput);
+useMathRouterInput.addEventListener("change", persistSettings);
 
 clearHistoryButton.addEventListener("click", () => {
   state.messages = [];
@@ -142,6 +146,7 @@ function persistSettings() {
     temperature: String(normalizeTemperature()),
     topK: String(normalizeTopK()),
     useCache: useCacheInput.checked,
+    useMathRouter: useMathRouterInput.checked,
   };
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
 }
@@ -164,6 +169,9 @@ function applySettings() {
     }
     if (typeof settings.useCache === "boolean") {
       useCacheInput.checked = settings.useCache;
+    }
+    if (typeof settings.useMathRouter === "boolean") {
+      useMathRouterInput.checked = settings.useMathRouter;
     }
   } catch {
     // Ignore invalid saved settings.

@@ -1,94 +1,157 @@
 # Aurelius
 
-Aurelius is a Go implementation of a small transformer inference and training stack for math-focused language model experiments. It includes a byte-tokenized causal transformer, synthetic math curriculum generation, exact-match evaluation, checkpoint export tooling, and a local web interface backed by a math router.
+Aurelius is a Go toolkit for training, evaluating, and serving small math-focused language models. It includes a CPU inference runtime, synthetic math datasets, specialist arithmetic and derivative checkpoints, and a local browser chat interface.
 
-## Status
+The project is a research prototype built for inspectable, reproducible experiments. The math backend combines model inference with optional deterministic answer correction. Uncorrected checkpoint output remains experimental.
 
-Active research prototype. The codebase is designed for correctness, inspection, and reproducible small-model experiments rather than large-scale distributed training.
+## Requirements
 
-## Capabilities
+- Go 1.25 or later
+- Git
+- A modern web browser
+- `curl` for the command-line download instructions, or a browser to download release assets manually
 
-- Train small autoregressive MLP and transformer language models from JSONL math datasets.
-- Generate arithmetic, multiplication, and polynomial derivative curricula with metadata for grouped evaluation.
-- Evaluate checkpoints by exact-match accuracy across operation, level, prompt template, answer length, and other tags.
-- Serve a browser chat interface through the Go HTTP server.
-- Route natural-language math prompts through specialist checkpoints with deterministic fallback for supported expressions.
-- Export inference-only checkpoint artifacts by stripping optimizer state from trainer checkpoints.
-- Load GPT-2 style tokenizer and weight assets for parity-oriented inference experiments.
+The website is served by Go with embedded HTML, CSS, and JavaScript. No Node.js installation, frontend build, or GPU is required.
 
-## Quickstart
+## Run the Website
 
-Clone the repository and run the test suite:
+### 1. Get the source
 
-```bash
+```sh
 git clone https://github.com/augahmed/Aurelius.git
 cd Aurelius
-go test ./...
 ```
 
-Start the local web server:
+Use the current repository source for the generation controls described below. All subsequent commands run from the repository root.
 
-```bash
-go run ./cmd/aurelius serve
+### 2. Download the released checkpoints
+
+Open the [math-router-v1 release](https://github.com/augahmed/Aurelius/releases/tag/math-router-v1) and download **both JSON files** under **Assets** into an `artifacts` directory at the repository root:
+
+| Asset | Purpose |
+| --- | --- |
+| [math-router-arithmetic-v4b.json](https://github.com/augahmed/Aurelius/releases/download/math-router-v1/math-router-arithmetic-v4b.json) | Arithmetic specialist checkpoint |
+| [math-router-derivative-full-v2.json](https://github.com/augahmed/Aurelius/releases/download/math-router-v1/math-router-derivative-full-v2.json) | Polynomial derivative specialist checkpoint |
+
+Alternatively, download them from the terminal:
+
+```sh
+mkdir -p artifacts
+
+curl -fL --retry 3 \
+  -o artifacts/math-router-arithmetic-v4b.json \
+  https://github.com/augahmed/Aurelius/releases/download/math-router-v1/math-router-arithmetic-v4b.json
+
+curl -fL --retry 3 \
+  -o artifacts/math-router-derivative-full-v2.json \
+  https://github.com/augahmed/Aurelius/releases/download/math-router-v1/math-router-derivative-full-v2.json
 ```
 
-Open `http://localhost:8080`. Without checkpoint flags, the server uses the built-in toy backend so the web path can be tested immediately.
-
-## Math Router
-
-The highest-accuracy math path is the `math-router` backend. It normalizes supported user prompts into direct model prompts, asks the trained specialist checkpoint first, and falls back to deterministic math evaluation when the model answer does not exactly match the computed result.
-
-Plain `go run ./cmd/aurelius serve` does not load the released math checkpoints. Public users need to download the release assets and pass them explicitly.
-
-Download these release checkpoint files into `./artifacts/`:
+The resulting files should be:
 
 ```text
-artifacts/math-router-arithmetic-v4b.json
-artifacts/math-router-derivative-full-v2.json
+Aurelius/
+  artifacts/
+    math-router-arithmetic-v4b.json
+    math-router-derivative-full-v2.json
 ```
 
-Then run:
+Checkpoint files are distributed separately from the source. Cloning the repository or downloading GitHub's source archive does not include them. The release notes provide SHA-256 checksums for verification. Browse [all releases](https://github.com/augahmed/Aurelius/releases) for other published versions.
 
-```bash
+### 3. Start the server
+
+```sh
 go run ./cmd/aurelius serve \
   -backend math-router \
   -checkpoint ./artifacts/math-router-arithmetic-v4b.json \
   -derivative-checkpoint ./artifacts/math-router-derivative-full-v2.json
 ```
 
-This route is intended for precise supported math tasks, not unrestricted general chat. It is appropriate for arithmetic, multiplication, and the derivative formats covered by the training and router code.
+### 4. Open the website
 
-## Checkpoint Release
+Open [http://localhost:8080](http://localhost:8080) in your browser. Keep the terminal running while using the website. Press **Ctrl+C** in the terminal to stop the server.
 
-Trainer checkpoints include Adam optimizer state so training can resume. Public inference artifacts should strip that state before release:
+Example prompts:
 
-```bash
-go run ./cmd/aurelius export-checkpoint \
-  -checkpoint ./artifacts/math-transformer-2layer-l1-l4-direct-v4b.json \
-  -output ./release-checkpoints/math-router-arithmetic-v4b.json
+- `What is 7 times 8?`
+- `What is 12 + 7?`
+- `What is the derivative of 4x^2 + 9x + 8?`
 
-go run ./cmd/aurelius export-checkpoint \
-  -checkpoint ./artifacts/math-transformer-2layer-l7-derivative-full-v2.json \
-  -output ./release-checkpoints/math-router-derivative-full-v2.json
+To use a different port, add `-addr localhost:8081` to the server command and open `http://localhost:8081`.
+
+## Generation Controls
+
+Expand **Generation controls** below the prompt field to adjust the next request:
+
+| Control | Behavior |
+| --- | --- |
+| Max tokens | Limits generated tokens. Math checkpoints use byte tokenization; longer expressions need more tokens. |
+| Temperature | Controls sampling randomness when sampling is enabled. Use `0` for greedy math decoding. |
+| Top K | Limits candidate tokens. The math-router web backend caps this at `1` for greedy decoding. |
+| KV cache | Requests cached decoding when the model supports it. |
+| Deterministic math router | Enables or disables deterministic answer correction for the math-router backend. Enabled by default. |
+
+With **Deterministic math router checked**, Aurelius asks the selected model first and replaces incorrect answers with a deterministic result for expressions the solver supports. It also uses that result if model generation fails on a supported expression.
+
+With **the checkbox unchecked**, Aurelius returns the model's answer without deterministic correction or solver fallback. Prompt normalization and specialist checkpoint selection still occur. For example, `What is 7 times 8?` becomes `7 * 8 = ` before reaching the arithmetic model. Both `derivative` and `derrivative` are recognized; derivative prompts use the training prefix `Derrivative: `.
+
+The checkbox applies to the `math-router` backend. Chat history and generation settings are saved in the browser's `localStorage`. For longer derivative answers, increase Max tokens to `32` or `64`; the UI initially uses `8`.
+
+## Model Scope and Limitations
+
+The router recognizes integer addition, subtraction, multiplication, and derivative questions. Its deterministic derivative solver handles supported polynomials. This backend is intended for supported math tasks rather than unrestricted conversation.
+
+Corrected website answers and raw model accuracy are different measurements. The released derivative checkpoint can produce incorrect or malformed answers without correction, including for standalone powers such as `x^2` and `x^3`.
+
+The current derivative data generator creates degree 1–3 polynomials with positive coefficients for every term, including a constant. Missing terms, zero or negative coefficients, and degree 4 or higher require broader training coverage. Normalizing the wording does not guarantee a correct model answer.
+
+See [model evaluation](docs/model-evaluation.md) for raw checkpoint evaluation, error analysis, and targeted replay training.
+
+## Troubleshooting
+
+| Symptom | Resolution |
+| --- | --- |
+| `read checkpoint: ... no such file or directory` | Download both release assets and confirm their filenames and locations. Relative paths are resolved from the terminal's current directory. |
+| The website uses the toy backend | Start the server with `-backend math-router` and both checkpoint flags shown above. |
+| The math router checkbox is missing after updating | Restart the Go server and refresh the browser. The UI is embedded in the server binary. |
+| The model answer is incomplete | Increase Max tokens to `32` or `64`. |
+| Uncorrected answers are incorrect or malformed | Keep correction enabled for supported tasks, or evaluate and improve the checkpoint's training coverage. |
+| `could not recognize a supported math question` | Use an explicit arithmetic expression or a derivative question like the examples above. |
+| Port 8080 is already in use | Add `-addr localhost:8081` and open the corresponding URL. |
+
+## Other Backends
+
+`serve` accepts `-backend auto|toy|gpt2|mathlm|math-router`.
+
+- **math-router:** Loads both specialist checkpoints and normalizes supported math questions.
+- **mathlm:** Loads a single Aurelius JSON checkpoint.
+- **gpt2:** Loads local GPT-2 configuration, tokenizer, and safetensors assets.
+- **toy:** Exercises the inference and web interface without trained checkpoints.
+- **auto:** Selects math-router when both checkpoints are supplied, mathlm when one is supplied, GPT-2 when complete assets exist under `artifacts/gpt2/`, and otherwise toy.
+
+To try the interface without downloading checkpoints:
+
+```sh
+go run ./cmd/aurelius serve -backend toy
 ```
 
-Attach selected files from `./release-checkpoints/` to a GitHub Release. Do not commit or publish the full `artifacts/` directory; it can contain intermediate checkpoints, eval errors, datasets, and local experiment outputs.
+To serve a single trained checkpoint:
 
-Recommended release checks:
-
-```bash
-go test ./...
-
-grep -RInE '/Users|C:\\Users|private|secret|api[_-]?key|password|email|Bearer|BEGIN .* PRIVATE KEY' ./release-checkpoints
+```sh
+go run ./cmd/aurelius serve \
+  -backend mathlm \
+  -checkpoint ./artifacts/your-checkpoint.json
 ```
 
-Expected result: no output.
+## Training and Evaluation
 
-## Training Smoke Test
+Aurelius supports small autoregressive MLP and transformer models, synthetic math curricula, JSON checkpoint save/resume, and exact-match evaluation grouped by operation, curriculum level, and prompt template.
 
-Generate a small dataset and train a transformer checkpoint:
+Run a bounded training experiment:
 
-```bash
+```sh
+mkdir -p artifacts
+
 go run ./cmd/aurelius gen-math-data \
   -output-dir ./data/arithmetic-smoke \
   -operations add,sub,mul \
@@ -108,166 +171,52 @@ go run ./cmd/aurelius train-math \
   -max-steps 1000 \
   -log-every 100 \
   -grad-clip 1
+
+go run ./cmd/aurelius eval-math \
+  -checkpoint ./artifacts/math-transformer-smoke.json \
+  -data ./data/arithmetic-smoke/val.jsonl \
+  -max-tokens 24
 ```
 
-## Architecture Overview
+Additional guides:
 
-Aurelius keeps the runtime small and inspectable:
+- [Training and inference](docs/llm-training.md)
+- [Model evaluation and regression checks](docs/model-evaluation.md)
+- [Architecture](docs/architecture.md)
 
-- `internal/tensor` provides basic CPU tensor operations.
-- `internal/tokenizer` defines tokenizer boundaries and includes byte-level and GPT-2 style BPE tokenizers.
-- `internal/model` defines shared model interfaces and configuration.
-- `internal/arithmetic` generates synthetic math datasets and converts examples into training sequences.
-- `internal/textdata` loads, inspects, deduplicates, splits, and converts raw text and instruction JSONL.
-- `internal/gpt2` loads GPT-2 model config metadata from local `config.json` files.
-- `internal/mathlm` contains the trainable autoregressive MLP and transformer language models.
-- `internal/mathrouter` normalizes supported math prompts and coordinates model-first inference with deterministic fallback.
-- `internal/transformer` contains a deterministic toy transformer-style model that exercises the runtime path.
-- `internal/sampler` provides greedy and temperature-based next-token selection.
-- `internal/runtime` coordinates tokenization, model forward passes, autoregressive generation, stop strings, and optional KV-cached decoding.
-- `internal/server` serves the local chat interface and JSON generation API.
-- `cmd/aurelius` exposes the prototype via a CLI.
+## Publishing Checkpoints
 
-## Package Layout
+Training checkpoints include Adam optimizer state for resuming training. Export inference assets before attaching them to a GitHub Release:
 
-```text
-aurelius/
-  cmd/aurelius/        CLI entrypoint
-  internal/tensor/     Basic tensor math primitives
-  internal/tokenizer/  Tokenizer interfaces and implementations
-  internal/gpt2/       GPT-2 asset config loader
-  internal/model/      Shared model interfaces and config
-  internal/transformer/ Tiny transformer-style model
-  internal/mathrouter/ Math prompt normalization and router fallback
-  internal/sampler/    Token sampling strategies
-  internal/runtime/    Generation engine
-  internal/server/     Web server and browser UI
-  benchmarks/          Benchmark harnesses and notes
-  docs/                Architecture and design notes
+```sh
+go run ./cmd/aurelius export-checkpoint \
+  -checkpoint ./artifacts/your-training-checkpoint.json \
+  -output ./release-checkpoints/your-inference-checkpoint.json
 ```
 
-## Current Scope
+Export removes optimizer state by default. Run `go test ./...` and review exported files for private data before publishing. Upload only the selected inference files; `artifacts/` may contain intermediate checkpoints, datasets, and local experiment outputs. Generated data and checkpoint directories are excluded from Git.
 
-Aurelius is strongest as a controlled math inference platform. The math-router backend combines trained specialist checkpoints with exact deterministic validation for supported expressions. The standalone checkpoints are still small neural models and should be evaluated with `eval-math` before being presented as general-purpose math solvers.
+## Development
 
-Generated datasets, checkpoints, cache directories, release checkpoint exports, and local virtual environments are excluded from Git. Public checkpoint files should be distributed through GitHub Releases or another artifact channel.
-
-## Example CLI Usage
-
-```bash
-go run ./cmd/aurelius -prompt "hello world" -max-tokens 10
-go run ./cmd/aurelius -prompt "hello world" -max-tokens 10 -use-cache=true
-go run ./cmd/aurelius generate -prompt "hello world" -max-tokens 10 -use-cache=true
-go run ./cmd/aurelius generate-gpt2 -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -prompt "hello world" -max-tokens 1
-go run ./cmd/aurelius emit-gpt2-observation -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -prompt "hello world" -top-k 5
-go run ./cmd/aurelius inspect-gpt2-next -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -prompt "hello world" -top-k 5
-go run ./cmd/aurelius validate-gpt2 -model-config /path/to/config.json -weights /path/to/model.safetensors -vocab /path/to/vocab.json -merges /path/to/merges.txt -fixture /path/to/reference.json
-go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic -levels 1,2,3,4,5
-go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l2-small-sub -operations sub -levels 2 -answer-digits 1 -small-difference-only
-go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l2-question -operations add,sub -levels 2 -templates question
-go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l3-worked -operations add,sub -levels 3 -reasoning-style worked
-go run ./cmd/aurelius mix-math-data -output-dir ./data/arithmetic-l2-replay -inputs ./data/arithmetic-l2-transformer:1,./data/arithmetic-l2-small-sub:2
-go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l3-transformer -operations add,sub -levels 3
-go run ./cmd/aurelius gen-math-instructions -data-dir ./data/arithmetic-l3-transformer -output-dir ./data/instructions/math
-go run ./cmd/aurelius fetch-text-data -url-file ./data/text/math-urls.txt -output-dir ./data/text/web-math
-go run ./cmd/aurelius inspect-text-data -text ./data/text/web-math
-go run ./cmd/aurelius dedupe-text-data -text ./data/text/web-math -output-dir ./data/text/web-math-deduped
-go run ./cmd/aurelius split-text-data -text ./data/text/web-math-deduped -output-dir ./data/text/web-math-split -val-ratio 0.1
-go run ./cmd/aurelius train-math -data-dir ./data/arithmetic -checkpoint ./artifacts/mathlm.json
-go run ./cmd/aurelius train-text -text ./data/text/web-math-split/train -val-text ./data/text/web-math-split/val -checkpoint ./artifacts/aurelius-text.json
-go run ./cmd/aurelius eval-math -checkpoint ./artifacts/mathlm.json -data ./data/arithmetic/val.jsonl
-go run ./cmd/aurelius eval-math -checkpoint ./artifacts/mathlm.json -data ./data/arithmetic/val.jsonl -show-errors 10 -errors-out ./artifacts/math-errors.json
-go run ./cmd/aurelius generate-math -checkpoint ./artifacts/mathlm.json -prompt "12 + 7 = "
-go run ./cmd/aurelius generate-checkpoint -checkpoint ./artifacts/aurelius-text.json -prompt "User: hello\n\nAssistant:" -max-tokens 64
-go run ./cmd/aurelius export-checkpoint -checkpoint ./artifacts/mathlm.json -output ./release-checkpoints/mathlm-inference.json
-go run ./cmd/aurelius serve
-go run ./cmd/aurelius serve -backend gpt2
-go run ./cmd/aurelius serve -backend mathlm -checkpoint ./artifacts/aurelius-text.json
-go run ./cmd/aurelius serve -addr localhost:8080
-go run ./cmd/aurelius tokenize -vocab /path/to/vocab.json -merges /path/to/merges.txt -text "hello world"
-go run ./cmd/aurelius inspect-model -model-config /path/to/config.json -vocab /path/to/vocab.json -merges /path/to/merges.txt
-```
-
-## Web UI
-
-Start the local server:
-
-```bash
-go run ./cmd/aurelius serve
-```
-
-Then open `http://localhost:8080`.
-
-`serve` supports `-backend auto|toy|gpt2|mathlm|math-router`. In `auto` mode, Aurelius uses `math-router` when both specialist checkpoints are provided, uses `mathlm` when a single JSON checkpoint is provided, uses GPT-2 when complete assets exist under `artifacts/gpt2/`, and otherwise falls back to the toy model.
-
-The web UI provides:
-
-- a chat-style interface
-- prompt entry
-- max token control
-- temperature control
-- top-k control
-- cache usage toggle
-- browser-side history persisted in `localStorage`
-- basic markdown rendering for assistant responses
-
-When `serve` is using the GPT-2 backend, the web path now applies conservative request limits for responsiveness: a short assistant preamble, bounded temperature and top-k sampling, modest default reply length, capped generation length, trimmed conversation history, and cache-aware incremental decoding.
-
-When `serve` is using the `mathlm` backend, it loads a local Aurelius JSON checkpoint and applies chat-oriented defaults, including stop strings for `User:` turns. For higher-accuracy math web inference, `-backend math-router` normalizes user phrasing into direct math prompts and routes to arithmetic and derivative specialist checkpoints. See [docs/llm-training.md](docs/llm-training.md) for text pretraining, instruction tuning, checkpoint generation, web inference, and math regression commands.
-
-## Arithmetic Training
-
-Aurelius now includes a student-scale from-scratch training path for arithmetic. It uses:
-
-- synthetic arithmetic JSONL datasets with curriculum metadata
-- the existing byte tokenizer for a minimal training-first path
-- `train-math -model mlp` for the original fixed-context autoregressive MLP language model
-- `train-math -model transformer` for a configurable-depth causal decoder transformer with manual full-path backpropagation
-- JSON checkpoints for save/resume
-- step-limited training, progress logging, periodic checkpoints, gradient clipping, and learning-rate warmup/decay for longer curriculum runs
-- direct-answer, worked-solution, compact worked, or derivative coefficient-vector completions via `gen-math-data -reasoning-style direct|worked|compact|coefficients`
-- exact-match evaluation on held-out arithmetic prompts, grouped by operation and curriculum level
-
-This path is intentionally small and inspectable. It is not a large-scale LLM training stack and it does not replace the existing GPT-2 inference path.
-
-Curriculum levels let you scale data difficulty without changing the model first:
-
-```bash
-go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l1 -operations add,sub -levels 1
-go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l1-l3 -operations add,sub -levels 1,2,3
-go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-l3-worked -operations add,sub -levels 3 -reasoning-style worked
-go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-word -operations word -levels 6
-go run ./cmd/aurelius gen-math-data -output-dir ./data/arithmetic-derivative -operations derivative -levels 7 -reasoning-style coefficients
-go run ./cmd/aurelius train-math -model transformer -data-dir ./data/arithmetic-l1 -checkpoint ./artifacts/math-transformer-l1.json -num-heads 4 -num-layers 2 -epochs 25 -batch-size 32 -learning-rate 0.003 -warmup-steps 100 -decay-steps 2000 -min-learning-rate 0.0003
-```
-
-For larger curriculum runs, prefer bounded smoke runs before committing to a long training job:
-
-```bash
-go run ./cmd/aurelius train-math -model transformer -data-dir ./data/arithmetic-l1-l3 -checkpoint ./artifacts/math-transformer-curriculum.json -num-heads 4 -num-layers 2 -epochs 50 -batch-size 32 -learning-rate 0.003 -warmup-steps 200 -decay-steps 5000 -min-learning-rate 0.0003 -max-steps 2000 -log-every 100 -save-every 1000 -grad-clip 1
-go run ./cmd/aurelius train-math -model transformer -data-dir ./data/arithmetic-l1-l3 -checkpoint ./artifacts/math-transformer-curriculum.json -resume ./artifacts/math-transformer-curriculum.json -epochs 50 -batch-size 32 -learning-rate 0.003 -max-steps 2000 -log-every 100 -save-every 1000 -grad-clip 1
-```
-
-## Development Commands
-
-```bash
+```sh
 gofmt -w ./cmd ./internal
 go test ./...
-go run ./cmd/aurelius -prompt "hello world" -max-tokens 10
-go run ./cmd/aurelius -prompt "hello world" -max-tokens 10 -use-cache=true
-go run ./cmd/aurelius serve
 ```
 
-## Notes
+Core packages:
 
-This repository supports Aurelius JSON checkpoints for trained math models and local GPT-2 style assets for parity experiments. The current focus is architectural clarity, stable tests, and a small inference path that future work can replace piece by piece.
-
-Cache-aware generation is optional per model. `runtime.Engine` detects models that implement the cache-capable extension and uses incremental decoding only for those models; all other models continue to use the uncached full-sequence path.
-
-The local web UI uses the same runtime engine and generation options as the CLI. Chat history is stored in the browser rather than persisted server-side.
-
-The `generate-gpt2` path runs a non-cached GPT-2 style forward pass from loaded safetensors weights, while `inspect-gpt2-next` and `validate-gpt2` support parity validation. The default CLI and web UI still use the toy transformer unless a specific backend or checkpoint is provided.
+| Package | Responsibility |
+| --- | --- |
+| `internal/arithmetic` | Synthetic math curricula and training examples |
+| `internal/mathlm` | Trainable MLP and transformer models, checkpoints, and evaluation |
+| `internal/mathrouter` | Prompt normalization, specialist selection, and optional answer correction |
+| `internal/runtime` | Autoregressive generation, sampling, stopping, and cache support |
+| `internal/server` | Embedded website and JSON generation API |
+| `internal/tokenizer` | Byte tokenization and GPT-2 BPE |
+| `internal/gpt2` | GPT-2 asset loading and inference |
+| `internal/tensor`, `internal/transformer`, `internal/model`, `internal/sampler` | Tensor operations, prototype transformer, model contracts, and token selection |
+| `internal/textdata` | Text ingestion, preparation, and instruction datasets |
 
 ## License
 
-This project is released under the MIT License. See [LICENSE](LICENSE).
+Aurelius is released under the [MIT License](LICENSE).

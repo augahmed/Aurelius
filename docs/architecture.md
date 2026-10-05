@@ -90,6 +90,8 @@ The first Aurelius webpage is served directly by Go from embedded static assets.
 
 This keeps state management lightweight while preserving a clean boundary between the UI, HTTP layer, and generation runtime.
 
+The generation controls include a checked-by-default deterministic math router checkbox. `/generate` accepts an optional `use_math_router` boolean; omitted or true preserves existing solver and correction behavior. False sets the request-local `runtime.GenerateOptions.DisableMathRouter` flag, so concurrent requests do not change shared router state. The math backend still normalizes the question and selects its arithmetic or derivative checkpoint, but returns the model completion without answer correction or deterministic fallback, and honors the requested sampling settings. Model errors are returned to the caller. Other backends ignore this flag. The browser saves the selection with its other generation settings.
+
 ## Student-Scale Training Path
 
 The current training path is intentionally narrower than the GPT-2 inference stack:

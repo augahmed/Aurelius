@@ -32,13 +32,14 @@ type ChatMessage struct {
 }
 
 type GenerateRequest struct {
-	Prompt      string        `json:"prompt"`
-	MaxTokens   int           `json:"max_tokens"`
-	Temperature float64       `json:"temperature"`
-	TopK        int           `json:"top_k"`
-	UseCache    bool          `json:"use_cache"`
-	Stop        []string      `json:"stop"`
-	Messages    []ChatMessage `json:"messages"`
+	Prompt        string        `json:"prompt"`
+	MaxTokens     int           `json:"max_tokens"`
+	Temperature   float64       `json:"temperature"`
+	TopK          int           `json:"top_k"`
+	UseCache      bool          `json:"use_cache"`
+	UseMathRouter *bool         `json:"use_math_router"`
+	Stop          []string      `json:"stop"`
+	Messages      []ChatMessage `json:"messages"`
 }
 
 type GenerateResponse struct {
@@ -136,13 +137,7 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	options := s.resolveGenerateOptions(req)
-	output, err := s.engine.GenerateWithOptions(prompt, runtime.GenerateOptions{
-		MaxTokens:   options.MaxTokens,
-		TopK:        options.TopK,
-		UseCache:    options.UseCache,
-		StopStrings: options.StopStrings,
-		Temperature: options.Temperature,
-	})
+	output, err := s.engine.GenerateWithOptions(prompt, options)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -225,11 +220,12 @@ func (s *Server) resolveGenerateOptions(req GenerateRequest) runtime.GenerateOpt
 	}
 
 	return runtime.GenerateOptions{
-		MaxTokens:   maxTokens,
-		TopK:        resolveTopK(req.TopK, s.policy),
-		UseCache:    useCache,
-		StopStrings: resolveStopStrings(req.Stop, s.policy),
-		Temperature: resolveTemperature(req.Temperature, s.policy),
+		DisableMathRouter: req.UseMathRouter != nil && !*req.UseMathRouter,
+		MaxTokens:         maxTokens,
+		TopK:              resolveTopK(req.TopK, s.policy),
+		UseCache:          useCache,
+		StopStrings:       resolveStopStrings(req.Stop, s.policy),
+		Temperature:       resolveTemperature(req.Temperature, s.policy),
 	}
 }
 
